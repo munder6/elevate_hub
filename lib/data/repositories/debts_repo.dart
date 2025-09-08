@@ -350,8 +350,32 @@ class DebtsRepo {
   }
 
   Future<void> settleAll(String debtId) async {
-    await fs.update('debts/$debtId', {'status': 'settled'});
-  }
+    final uid = auth.currentUser?.uid ?? 'system';
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      final ref = fs.doc('debts/$debtId');
+      final snap = await tx.get(ref);
+      final m = snap.data() as Map<String, dynamic>?;
+      if (m == null) return;
+
+      final total = (m['amount'] ?? 0) as num;
+      final payments = (m['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      final paidSoFar =
+      payments.fold<num>(0, (sum, p) => sum + (p['amount'] as num? ?? 0));
+      final remaining = total - paidSoFar;
+
+      if (remaining > 0) {
+        payments.add({
+          'amount': remaining,
+          'at': DateTime.now().toIso8601String(),
+          'by': uid,
+        });
+      }
+
+      tx.update(ref, {
+        'payments': payments,
+        'status': 'settled',
+      });
+    });  }
 
   Future<void> delete(String debtId) async {
     await fs.delete('debts/$debtId');

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:elevate_hub/presintation/modules/sessions/widgets/close_daily_sheet.dart';
 import 'package:elevate_hub/presintation/modules/sessions/widgets/session_receipt_sheet.dart';
 import 'package:flutter/material.dart';
@@ -286,14 +287,38 @@ class _DailySessionViewState extends State<DailySessionView> {
                             final grand = (sm['grandTotal'] ?? 0) as num;
 
                             if (memberId != null && grand > 0) {
-                              await sessionsRepo.debts.createDebt(
-                                memberId: memberId,
-                                memberName: memberName,
-                                amount: grand,
-                                reason: 'جلسة يومية غير مدفوعة',
-                                refType: 'session',
-                                refId: sid,
-                              );
+                              final debtRef =
+                              sessionsRepo.fs.doc('debts/session_$sid');
+                              final ds = await debtRef.get();
+                              final data = {
+                                'amount': grand,
+                                'reason': 'جلسة يومية غير مدفوعة',
+                                'memberId': memberId,
+                                'memberName': memberName,
+                                'refType': 'session',
+                                'refId': sid,
+                              };
+                              if (ds.exists) {
+                                await debtRef.set(data, SetOptions(merge: true));
+                              } else {
+                                await debtRef.set({
+                                  ...data,
+                                  'status': 'open',
+                                  'createdAt': DateTime.now().toIso8601String(),
+                                  'payments': <Map<String, dynamic>>[],
+                                });
+                              }
+
+                              final q = await sessionsRepo.fs
+                                  .col('debts')
+                                  .where('refType', isEqualTo: 'session')
+                                  .where('refId', isEqualTo: sid)
+                                  .get();
+                              for (final d in q.docs) {
+                                if (d.id != 'session_$sid') {
+                                  await d.reference.delete();
+                                }
+                              }
                             }
                           }
                         }

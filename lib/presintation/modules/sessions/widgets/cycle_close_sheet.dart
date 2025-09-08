@@ -27,7 +27,6 @@ class CycleCloseSheet extends StatelessWidget {
     final Stream<List<OrderModel>> ordersStream =
     refType == 'weekly' ? ordersRepo.watchByWeekly(refId) : ordersRepo.watchByMonthly(refId);
 
-    bool paid = true;
     String method = 'cash';
 
     return DraggableScrollableSheet(
@@ -144,13 +143,6 @@ class CycleCloseSheet extends StatelessWidget {
                       ),
 
                       const SizedBox(height: 8),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('اعتبارها مدفوعة الآن؟'),
-                        value: paid,
-                        onChanged: (v) => setState(() => paid = v),
-                      ),
-                      const SizedBox(height: 8),
                       DropdownButtonFormField<String>(
                         value: method,
                         isExpanded: true,
@@ -159,11 +151,10 @@ class CycleCloseSheet extends StatelessWidget {
                           border: OutlineInputBorder(),
                         ),
                         items: const [
-                          DropdownMenuItem(value: 'cash', child: Text('نقدًا')),
-                          DropdownMenuItem(value: 'card', child: Text('بطاقة/تطبيق')),
-                          DropdownMenuItem(value: 'other', child: Text('أخرى')),
+                          DropdownMenuItem(value: 'app', child: Text('تطبيق')),
+                          DropdownMenuItem(value: 'unpaid', child: Text('تسجيل دين')),
                         ],
-                        onChanged: paid ? (v) => setState(() => method = v ?? 'cash') : null,
+                        onChanged: (v) => setState(() => method = v ?? 'cash'),
                       ),
 
                       const SizedBox(height: 16),
@@ -180,7 +171,7 @@ class CycleCloseSheet extends StatelessWidget {
                             child: FilledButton(
                               onPressed: () {
                                 Navigator.pop<Map<String, dynamic>>(context, {
-                                  'paid': paid,
+                                  'paid': method != 'unpaid',
                                   'method': method,
                                 });
                               },

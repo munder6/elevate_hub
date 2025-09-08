@@ -13,14 +13,12 @@ String arPaymentMethod(String pm) {
   switch (pm) {
     case 'cash':
       return 'كاش';
-    case 'card':
-      return 'بطاقة/جهاز';
     case 'app':
       return 'تطبيق';
     case 'unpaid':
-      return 'لم يُدفع (دين)';
+      return 'تسجيل دين';
     default:
-      return 'أخرى';
+      return '—';
   }
 }
 

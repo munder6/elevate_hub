@@ -344,8 +344,7 @@ class _HourlyTile extends StatelessWidget {
   String _arMethod(String m) => switch (m) {
     'cash' => 'كاش',
     'app' => 'تطبيق',
-    'card' => 'بطاقة',
-    'unpaid' => 'غير مدفوع',
+    'unpaid' => 'تسجيل دين',
     _ => m,
   };
 
@@ -355,7 +354,6 @@ class _HourlyTile extends StatelessWidget {
     final methodColor = switch (s.paymentMethod) {
       'cash'   => Colors.green,
       'app'    => Colors.blue,
-      'card'   => Colors.purple,
       'unpaid' => Colors.orange,
       _        => theme.colorScheme.primary,
     };

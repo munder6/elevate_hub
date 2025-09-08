@@ -16,8 +16,7 @@ class SessionDetailsSheet extends StatelessWidget {
   String arMethod(String? m) => switch (m) {
     'cash' => 'كاش',
     'app' => 'تطبيق',
-    'card' => 'بطاقة',
-    'unpaid' => 'غير مدفوع',
+    'unpaid' => 'تسجيل دين',
     _ => '—',
   };
 
@@ -26,7 +25,6 @@ class SessionDetailsSheet extends StatelessWidget {
     return switch (m) {
       'cash' => Colors.green,
       'app' => Colors.blue,
-      'card' => Colors.purple,
       'unpaid' => Colors.orange,
       _ => theme.colorScheme.primary,
     };

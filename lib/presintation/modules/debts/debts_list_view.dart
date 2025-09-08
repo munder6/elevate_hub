@@ -8,6 +8,7 @@ import '../../../data/repositories/members_repo.dart';
 import '../../../data/repositories/users_repo.dart';
 import '../../../data/repositories/debts_repo.dart';
 import '../../routes/app_routes.dart';
+import 'add_debt_dialog.dart';
 import 'debt_payment_dialog.dart';
 
 class DebtsListView extends StatefulWidget {
@@ -25,18 +26,25 @@ class _DebtsListViewState extends State<DebtsListView> {
   String _sCurrency(num v) => '₪ ${v.toStringAsFixed(2)}';
 
   Future<void> _createDebt(BuildContext context) async {
-    final amount = await showDialog<num>(
-      context: context,
-      builder: (_) => const DebtPaymentDialog(maxAmount: 999999),
-    );
-    if (amount != null && amount > 0 && widget.memberId != null) {
+    String? memberId = widget.memberId;
+    String? memberName;
+    if (memberId != null) {
       final mRepo = MembersRepo();
-      final name = await mRepo.getMemberName(widget.memberId!);
+      memberName = await mRepo.getMemberName(memberId);
+    }
+    final result = await showDialog<AddDebtResult>(
+      context: context,
+      builder: (_) => AddDebtDialog(
+        memberId: memberId,
+        memberName: memberName,
+      ),
+    );
+    if (result != null && result.amount > 0) {
       await repo.createDebt(
-        memberId: widget.memberId!,
-        memberName: name ?? '',
-        amount: amount,
-        reason: 'دين يدوي',
+        memberId: result.memberId,
+        memberName: result.memberName,
+        amount: result.amount,
+        reason: result.reason.isEmpty ? null : result.reason,
       );
     }
   }
@@ -50,9 +58,7 @@ class _DebtsListViewState extends State<DebtsListView> {
       child: DefaultTabController(
         length: 3,
         child: Scaffold(
-          floatingActionButton: widget.memberId == null
-              ? null
-              : FloatingActionButton.extended(
+          floatingActionButton: FloatingActionButton.extended(
             onPressed: () => _createDebt(context),
             icon: const Icon(Icons.add),
             label: const Text('إضافة دين'),

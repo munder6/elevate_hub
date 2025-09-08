@@ -581,7 +581,7 @@ class _MemberTileCardState extends State<_MemberTileCard> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 16, color: textColor),
+          Icon(icon, size: 14.5, color: textColor),
           const SizedBox(width: 6),
           ConstrainedBox(
             constraints: BoxConstraints(

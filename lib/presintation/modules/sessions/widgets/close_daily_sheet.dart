@@ -416,28 +416,12 @@ class _CloseDailySheetState extends State<CloseDailySheet> {
                   title: const Text('تطبيق'),
                 ),
                 RadioListTile<String>(
-                  value: 'card',
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  groupValue: _method,
-                  onChanged: (v) => setState(() => _method = v!),
-                  title: const Text('بطاقة'),
-                ),
-                RadioListTile<String>(
-                  value: 'other',
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  groupValue: _method,
-                  onChanged: (v) => setState(() => _method = v!),
-                  title: const Text('أخرى'),
-                ),
-                RadioListTile<String>(
                   value: 'unpaid',
                   dense: true,
                   contentPadding: EdgeInsets.zero,
                   groupValue: _method,
                   onChanged: (v) => setState(() => _method = v!),
-                  title: const Text('لم يُدفع (تسجيل دين)'),
+                  title: const Text('تسجيل دين'),
                 ),
 
                 // قسم إثبات الدفع (يظهر فقط عند اختيار "تطبيق")
