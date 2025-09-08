@@ -125,12 +125,24 @@ class MemberWalletSheet extends StatelessWidget {
                       if (ok == true) {
                         final v = num.tryParse(ctrl.text.trim()) ?? 0;
                         if (v > 0) {
+                          // تحقق من الرصيد الحالي قبل الخصم لمعرفة إن كان سيُنشأ دين
+                          final pre = await wallet.getBalance(member.id);
                           // نستخدم topUp بقيمة سالبة كخصم حر غير مرتبط بدورة
                           await wallet.topUp(memberId: member.id, amount: -v, note: 'خصم يدوي');
                           if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('تم خصم ₪ ${v.toStringAsFixed(2)}')),
-                            );
+                            if (pre < v) {
+                              final debt = v - pre;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                      'تم خصم الرصيد المتاح وإنشاء دين ₪ ${debt.toStringAsFixed(2)}'),
+                                ),
+                              );
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('تم خصم ₪ ${v.toStringAsFixed(2)}')),
+                              );
+                            }
                           }
                         }
                       }

@@ -46,4 +46,29 @@ class MembersRepo {
       return Member.fromMap(d.id, m);
     });
   }
+
+  Future<void> delete(String id) async {
+    final batch = FirebaseFirestore.instance.batch();
+    // delete member document
+    batch.delete(fs.doc('members/$id'));
+    // delete wallet document
+    batch.delete(fs.doc('wallets/$id'));
+
+    // delete wallet transactions for this member
+    final walletTx = await fs
+        .col('wallet_tx')
+        .where('memberId', isEqualTo: id)
+        .get();
+    for (final d in walletTx.docs) {
+      batch.delete(d.reference);
+    }
+
+    // delete debts for this member
+    final debts = await fs.col('debts').where('memberId', isEqualTo: id).get();
+    for (final d in debts.docs) {
+      batch.delete(d.reference);
+    }
+
+    await batch.commit();
+  }
 }

@@ -94,7 +94,7 @@ class DebtsRepo {
         'amount': amount,
         'reason': 'Order',
         'status': 'open',
-        'createdAt': FieldValue.serverTimestamp(),
+        'createdAt': DateTime.now().toIso8601String(),
         'refType': 'order',
         'refId': orderId,
         if (sessionId != null) 'sessionId': sessionId,

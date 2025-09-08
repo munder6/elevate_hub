@@ -46,16 +46,44 @@ class WalletRepo {
       final pre = (wSnap.data()?['balance'] ?? 0) as num;
       final post = pre + amount;
 
-      tx.set(wRef, {
-        'balance': post,
-        'lastBalanceAt': now,
-      }, SetOptions(merge: true));
+      final debt = post < 0 ? -post : 0;
+      if (debt > 0) {
+        // الرصيد غير كافٍ → أنشئ دين بالباقي وحدّث الرصيد إلى صفر
+        tx.set(wRef, {
+          'balance': 0,
+          'lastBalanceAt': now,
+        }, SetOptions(merge: true));
+
+        tx.set(fs.col('debts').doc(), {
+          'memberId': memberId,
+          'amount': debt,
+          'reason': note ?? 'wallet_topup',
+          'status': 'open',
+          'createdAt': now,
+          if (refType != null) 'refType': refType,
+          if (refId != null) 'refId': refId,
+          'payments': <Map<String, dynamic>>[],
+        });
+      } else {
+        // لا يوجد دين → حدّث الرصيد كالمعتاد
+        tx.set(wRef, {
+          'balance': post,
+          'lastBalanceAt': now,
+        }, SetOptions(merge: true));
+      }
+
+      final noteWithDebt = () {
+        if (debt <= 0) return note;
+        final debtMsg = 'إنشاء دين ₪ ${debt.toString()}';
+        if (note == null || note.isEmpty) return debtMsg;
+        return '$note - $debtMsg';
+      }();
 
       tx.set(_tx.doc(), {
         'memberId': memberId,
         'amount': amount,
         'type': 'topup',
-        if (note != null) 'note': note,
+        if (noteWithDebt != null) 'note': noteWithDebt,
         if (refType != null) 'refType': refType, // NEW
         if (refId != null) 'refId': refId,       // NEW
         'at': now,
@@ -108,6 +136,9 @@ class WalletRepo {
         }
 
         // أنشئ دين بالباقي (بدون استدعاء ريبوز تانية عشان نظافة الترانزاكشن)
+        final mRef = fs.doc('members/$memberId');
+        final mSnap = await tx.get(mRef);
+        final memberName = (mSnap.data()?['name'] as String?) ?? '';
         final debtRef = fs.col('debts').doc();
         tx.set(debtRef, {
           'memberId': memberId,

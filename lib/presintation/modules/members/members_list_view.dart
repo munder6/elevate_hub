@@ -13,14 +13,37 @@ import '../subscriptions/monthly_cycle_sheet.dart';
 import '../subscriptions/weekly_cycle_sheet.dart';
 import 'member_form_dialog.dart';
 
-class MembersListView extends StatelessWidget {
+class MembersListView extends StatefulWidget {
   const MembersListView({super.key});
+
+  @override
+  State<MembersListView> createState() => _MembersListViewState();
+}
+
+class _MembersListViewState extends State<MembersListView> {
+  final usersRepo = UsersRepo();
+  final membersRepo = MembersRepo();
+  late final Stream<AppUser?> _meStream;
+  late final Stream<List<Member>> _membersStream;
+  final _searchCtrl = TextEditingController();
+  String _query = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _meStream = usersRepo.watchMe();
+    _membersStream = membersRepo.watchAll();
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final usersRepo = UsersRepo();
-    final membersRepo = MembersRepo();
 
     Future<void> _goLogin() async {
       Future.microtask(() => Get.offAllNamed(AppRoutes.login));
@@ -123,9 +146,44 @@ class MembersListView extends StatelessWidget {
         builder: (_) => MemberFormDialog(initial: m),
       );
       if (edited != null) {
-        await MembersRepo().update(edited.copyWith(id: m.id));
+        await membersRepo.update(edited.copyWith(id: m.id));
       }
     }
+
+    Future<void> _deleteMember(BuildContext context, Member m) async {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (_) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Text('حذف العضو'),
+            content: Text(
+                'سيتم حذف ${m.name} وجميع بياناته بما في ذلك المحفظة والديون. هل أنت متأكد؟'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                    backgroundColor: Theme.of(context).colorScheme.error),
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('حذف'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (ok == true) {
+        await membersRepo.delete(m.id);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('تم حذف ${m.name}')),
+          );
+        }
+      }
+    }
+
 
     Future<void> _addMember(BuildContext context) async {
       final m = await showDialog<Member>(
@@ -146,7 +204,7 @@ class MembersListView extends StatelessWidget {
           ),
         ),
         body: StreamBuilder<AppUser?>(
-          stream: usersRepo.watchMe(),
+          stream: _meStream,
           builder: (context, meSnap) {
             if (meSnap.connectionState == ConnectionState.waiting) {
               return const Center(child: CircularProgressIndicator());
@@ -162,12 +220,19 @@ class MembersListView extends StatelessWidget {
             }
 
             return StreamBuilder<List<Member>>(
-              stream: membersRepo.watchAll(),
+              stream: _membersStream,
               builder: (context, snap) {
                 if (!snap.hasData) {
                   return const Center(child: CircularProgressIndicator());
                 }
-                final members = snap.data!;
+                var members = snap.data!;
+                if (_query.isNotEmpty) {
+                  members = members
+                      .where((m) =>
+                  m.name.toLowerCase().contains(_query) ||
+                      (m.phone ?? '').toLowerCase().contains(_query))
+                      .toList();
+                }
 
                 return CustomScrollView(
                   slivers: [
@@ -196,6 +261,41 @@ class MembersListView extends StatelessWidget {
                         ],
                       ),
                     ),
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                        child: TextField(
+                          controller: _searchCtrl,
+                          decoration: InputDecoration(
+                            hintText: 'ابحث عن عضو…',
+                            prefixIcon: const Icon(Icons.search),
+                            filled: true,
+                            fillColor:
+                            theme.colorScheme.surfaceVariant.withOpacity(.55),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 12),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: BorderSide(
+                                color: theme.colorScheme.outlineVariant
+                                    .withOpacity(.45),
+                              ),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: BorderSide(
+                                color:
+                                theme.colorScheme.primary.withOpacity(.65),
+                                width: 1.2,
+                              ),
+                            ),
+                          ),
+                          onChanged: (v) =>
+                              setState(() => _query = v.trim().toLowerCase()),
+                        ),
+                      ),
+                    ),
+                    const SliverToBoxAdapter(child: Divider(height: 0)),
 
                     if (members.isEmpty)
                       SliverFillRemaining(
@@ -228,6 +328,7 @@ class MembersListView extends StatelessWidget {
                               onTap: () => _onTapMember(context, m),
                               onOpenWallet: () => _openWallet(context, m),
                               onEdit: () => _editMember(context, m),
+                              onDelete: () => _deleteMember(context, m),
                             );
                           },
                         ),
@@ -251,6 +352,7 @@ class _MemberTileCard extends StatefulWidget {
   final VoidCallback onTap;
   final VoidCallback onOpenWallet;
   final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
   const _MemberTileCard({
     required this.member,
@@ -258,6 +360,7 @@ class _MemberTileCard extends StatefulWidget {
     required this.onTap,
     required this.onOpenWallet,
     required this.onEdit,
+    required this.onDelete,
   });
 
   @override
@@ -279,7 +382,7 @@ class _MemberTileCardState extends State<_MemberTileCard> {
     final Color chevron = theme.colorScheme.onSurface.withOpacity(.55);
 
     // عرض ثابت للأزرار يمين حتى ما تزاحم المحتوى
-    const double trailingWidth = 120;
+    const double trailingWidth = 170;
 
     return AnimatedScale(
       duration: const Duration(milliseconds: 110),
@@ -401,6 +504,14 @@ class _MemberTileCardState extends State<_MemberTileCard> {
                           onTap: widget.onEdit,
                         ),
                         const SizedBox(width: 6),
+                        _iconBtn(
+                          context,
+                          tooltip: 'حذف',
+                          icon: Icons.delete_outline,
+                          onTap: widget.onDelete,
+                          color: theme.colorScheme.error,
+                        ),
+                        const SizedBox(width: 6),
                         Icon(Icons.arrow_forward_rounded,
                             size: 22, color: chevron),
                       ],
@@ -419,7 +530,8 @@ class _MemberTileCardState extends State<_MemberTileCard> {
   Widget _iconBtn(BuildContext context,
       {required String tooltip,
         required IconData icon,
-        required VoidCallback onTap}) {
+        required VoidCallback onTap,
+        Color? color}) {
     final theme = Theme.of(context);
     return Tooltip(
       message: tooltip,
@@ -438,7 +550,8 @@ class _MemberTileCardState extends State<_MemberTileCard> {
             ),
           ),
           child: Icon(icon,
-              size: 18, color: theme.colorScheme.onSurface.withOpacity(.8)),
+              size: 18,
+              color: color ?? theme.colorScheme.onSurface.withOpacity(.8)),
         ),
       ),
     );
