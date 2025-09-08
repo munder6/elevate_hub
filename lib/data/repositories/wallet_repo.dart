@@ -1,0 +1,246 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../services/firestore_service.dart';
+
+class WalletChargeResult {
+  final num deducted;     // كم انخصم من الرصيد
+  final num debtCreated;  // دين منشأ إن وُجد
+  final num preBalance;   // الرصيد قبل
+  final num postBalance;  // الرصيد بعد
+  const WalletChargeResult({
+    required this.deducted,
+    required this.debtCreated,
+    required this.preBalance,
+    required this.postBalance,
+  });
+}
+
+class WalletRepo {
+  final fs = FirestoreService();
+  CollectionReference<Map<String, dynamic>> get _wallets => fs.col('wallets');
+  CollectionReference<Map<String, dynamic>> get _tx => fs.col('wallet_tx');
+
+  // Stream<num> watchBalance(String memberId) {
+  //   return _wallets.doc(memberId).snapshots().map((d) {
+  //     final m = d.data();
+  //     return (m?['balance'] ?? 0) as num;
+  //   });
+  // }
+
+  Future<num> getBalance(String memberId) async {
+    final d = await fs.getDoc('wallets/$memberId');
+    final m = d.data();
+    return (m?['balance'] ?? 0) as num;
+  }
+
+  Future<void> topUp({
+    required String memberId,
+    required num amount,
+    String? note,
+    String? refType, // NEW (اختياري)
+    String? refId,   // NEW (اختياري)
+  }) async {
+    final now = DateTime.now().toIso8601String();
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      final wRef = fs.doc('wallets/$memberId');
+      final wSnap = await tx.get(wRef);
+      final pre = (wSnap.data()?['balance'] ?? 0) as num;
+      final post = pre + amount;
+
+      tx.set(wRef, {
+        'balance': post,
+        'lastBalanceAt': now,
+      }, SetOptions(merge: true));
+
+      tx.set(_tx.doc(), {
+        'memberId': memberId,
+        'amount': amount,
+        'type': 'topup',
+        if (note != null) 'note': note,
+        if (refType != null) 'refType': refType, // NEW
+        if (refId != null) 'refId': refId,       // NEW
+        'at': now,
+      });
+    });
+  }
+
+  /// يخصم المبلغ (amountDue) للأسبوعي/الشهري فقط.
+  /// لو الرصيد أقل → يخصم كل المتاح ويُنشئ دين بالباقي.
+  Future<WalletChargeResult> charge({
+    required String memberId,
+    required num amountDue,
+    required String refType, // 'weekly' | 'monthly'
+    required String refId,
+  }) async {
+    num pre = 0, post = 0, deducted = 0, debt = 0;
+    final now = DateTime.now().toIso8601String();
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      final wRef = fs.doc('wallets/$memberId');
+      final wSnap = await tx.get(wRef);
+      pre = (wSnap.data()?['balance'] ?? 0) as num;
+
+      if (pre >= amountDue) {
+        deducted = amountDue;
+        post = pre - amountDue;
+        tx.set(wRef, {'balance': post}, SetOptions(merge: true));
+        tx.set(_tx.doc(), {
+          'memberId': memberId,
+          'amount': -deducted,
+          'type': 'charge',
+          'refType': refType,
+          'refId': refId,
+          'at': now,
+        });
+      } else {
+        deducted = pre;
+        post = 0;
+        debt = amountDue - pre;
+
+        tx.set(wRef, {'balance': post}, SetOptions(merge: true));
+        if (deducted > 0) {
+          tx.set(_tx.doc(), {
+            'memberId': memberId,
+            'amount': -deducted,
+            'type': 'charge',
+            'refType': refType,
+            'refId': refId,
+            'at': now,
+          });
+        }
+
+        // أنشئ دين بالباقي (بدون استدعاء ريبوز تانية عشان نظافة الترانزاكشن)
+        final debtRef = fs.col('debts').doc();
+        tx.set(debtRef, {
+          'memberId': memberId,
+          'amount': debt,
+          'reason': '$refType:$refId',
+          'status': 'open',
+          'createdAt': now,
+          'refType': refType,
+          'refId': refId,
+          'payments': <Map<String, dynamic>>[],
+        });
+      }
+    });
+
+    return WalletChargeResult(
+      deducted: deducted,
+      debtCreated: debt,
+      preBalance: pre,
+      postBalance: post,
+    );
+  }
+
+
+  /// يعتمد المبلغ كمقدم (Top-up) ويربطه بمرجع الدورة
+  Future<void> addPrepaidCredit({
+    required String memberId,
+    required num amount,
+    required String cycleType, // 'monthly' | 'weekly'
+    required String cycleId,
+  }) async {
+    if (amount <= 0) return;
+
+    final now = DateTime.now().toIso8601String();
+    final wRef = fs.doc('wallets/$memberId');
+
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      // اقرأ الرصيد الحالي
+      final wSnap = await tx.get(wRef);
+      final current = (wSnap.data()?['balance'] ?? 0) as num;
+      final newBal = current + amount;
+
+      // حدّث الرصيد
+      tx.set(wRef, {
+        'balance': newBal,
+        'lastBalanceAt': now,
+      }, SetOptions(merge: true));
+
+      // سجّل حركة شحن wallet_tx
+      tx.set(fs.col('wallet_tx').doc(), {
+        'memberId': memberId,
+        'type': 'topup',
+        'amount': amount,
+        'note': '${cycleType}_prepaid',
+        'refType': cycleType,
+        'refId': cycleId,
+        'at': now,
+      });
+    });
+  }
+
+  /// يخصم المبلغ كله من المحفظة حتى لو أدى إلى رصيد سالب.
+  /// لو صار الرصيد سالب، ينشئ دين بالباقي (قيمة موجبة).
+  Future<void> chargeAmountAllowNegative({
+    required String memberId,
+    required num cost,
+    required String reason,   // مثال: 'Monthly fee'
+    required String refType,  // 'monthly' | 'weekly' | 'session' ...
+    required String refId,
+  }) async {
+    if (cost <= 0) return;
+
+    final now = DateTime.now().toIso8601String();
+
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      // 1) اقرأ المحفظة + اسم العضو للاستخدام في الدين
+      final wRef = fs.doc('wallets/$memberId');
+      final wSnap = await tx.get(wRef);
+      final current = (wSnap.data()?['balance'] ?? 0) as num;
+
+      final mRef = fs.doc('members/$memberId');
+      final mSnap = await tx.get(mRef);
+      final memberName = (mSnap.data()?['name'] as String?) ?? '';
+
+      // 2) خصم كامل
+      final newBal = current - cost;
+
+      // 3) حدّث الرصيد (قد يصبح سالب)
+      tx.set(wRef, {
+        'balance': newBal,
+        'lastBalanceAt': now,
+      }, SetOptions(merge: true));
+
+      // 4) لوق الخصم
+      tx.set(fs.col('wallet_tx').doc(), {
+        'memberId': memberId,
+        'type': 'charge',
+        'amount': -cost, // نكتبها سالبة في اللوق (اتجاه خصم)
+        'note': reason,
+        'refType': refType,
+        'refId': refId,
+        'at': now,
+      });
+
+      // 5) إن صار سالب => أنشئ دين بالمقدار الموجب الباقي
+      if (newBal < 0) {
+        final debtAmount = -newBal; // قيمة موجبة
+        tx.set(fs.col('debts').doc(), {
+          'memberId': memberId,
+          if (memberName.isNotEmpty) 'memberName': memberName,
+          'amount': debtAmount,
+          'reason': reason,
+          'status': 'open',
+          'createdAt': now,
+          'refType': refType,
+          'refId': refId,
+          'payments': <Map<String, dynamic>>[],
+        });
+      }
+    });
+  }
+
+
+
+  Stream<num> watchBalance(String memberId) {
+    return fs.watchDoc('wallets/$memberId').map((ds) {
+      final m = ds.data();
+      return (m?['balance'] ?? 0) as num;
+    });
+  }
+
+  Future<num> getBalanceOnce(String memberId) async {
+    final snap = await fs.getDoc('wallets/$memberId');
+    final m = snap.data();
+    return (m?['balance'] ?? 0) as num;
+  }
+}
