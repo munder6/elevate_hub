@@ -46,10 +46,15 @@ class WeeklyCyclesRepo {
   }
 
   /// يبدأ دورة أسبوعية وفق سعر الإعدادات — لا يخصم محفظة هنا.
-  Future<String> startCycle({required String memberId,required String memberName}) async {
+  Future<String> startCycle({
+    required String memberId,
+    required String memberName,
+    num? price,
+    num? dayCost,
+  }) async {
     final uid = auth.currentUser?.uid ?? 'system';
-    final price = await _weeklyPriceFromSettings();
-    final dayCost = price / 6;
+    final p = price ?? await _weeklyPriceFromSettings();
+    final dc = dayCost ?? p / 6;
 
     final doc = await _col.add({
       'memberId': memberId,
@@ -58,8 +63,8 @@ class WeeklyCyclesRepo {
       'drinksTotal': 0,
       'memberName': memberName,
       'status': 'active',
-      'priceAtStart': price,
-      'dayCost': dayCost,
+      'priceAtStart': p,
+      'dayCost': dc,
       'daysUsed': 0,
       'openDayId': null,
       'createdBy': uid,
@@ -67,11 +72,47 @@ class WeeklyCyclesRepo {
     return doc.id;
   }
 
+  Future<String> startWithPrepaidAndAutoCharge({
+    required String memberId,
+    required String memberName,
+    required num prepaidAmount,
+  }) async {
+    final weeklyPrice = await _weeklyPriceFromSettings();
+    final dayCost = weeklyPrice / 6;
+
+    final cycleId = await startCycle(
+      memberId: memberId,
+      memberName: memberName,
+      price: weeklyPrice,
+      dayCost: dayCost,
+    );
+
+    if (prepaidAmount > 0) {
+      await wallet.topUp(
+        memberId: memberId,
+        amount: prepaidAmount,
+        note: 'Weekly prepaid',
+        refType: 'weekly',
+        refId: cycleId,
+      );
+    }
+
+    await wallet.chargeAmountAllowNegative(
+      memberId: memberId,
+      cost: weeklyPrice,
+      reason: 'Weekly fee',
+      refType: 'weekly',
+      refId: cycleId,
+    );
+
+    return cycleId;
+  }
+
+
   /// يبدأ يوم جديد:
   /// - يمنع لو في يوم مفتوح
   /// - يمنع لو استُهلك يوم اليوم (dateKey)
   /// - يمنع لو لا يوجد أيام متبقية
-  /// - يشترط الرصيد >= dayCost (لا يُخصم الآن؛ الخصم عند الإغلاق)
   Future<String> startDay(String cycleId) async {
     final now = DateTime.now();
     final todayKey = _dateKey(now);
@@ -106,13 +147,7 @@ class WeeklyCyclesRepo {
         throw Exception('No remaining days.');
       }
 
-      // تحقق الرصيد ≥ dayCost
-      final wRef = fs.doc('wallets/$memberId');
-      final wSnap = await tx.get(wRef);
-      final bal = (wSnap.data()?['balance'] ?? 0) as num;
-      if (bal < dayCost) {
-        throw Exception('Insufficient balance for one day.');
-      }
+
 
       // أنشئ اليوم المفتوح (بدون خصم)
       final expectedCloseAt = now.add(const Duration(hours: 8));
