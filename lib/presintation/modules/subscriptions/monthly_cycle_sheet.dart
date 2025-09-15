@@ -9,7 +9,7 @@ import '../../../data/repositories/wallet_repo.dart';
 import '../../../data/repositories/monthly_cycles_repo.dart';
 import '../../../data/repositories/debts_repo.dart';
 import '../../modules/sessions/widgets/add_order_sheet.dart';
-import '../../wallet/wallet_topup_sheet.dart';
+import 'prepaid_amount_sheet.dart';
 
 class MonthlyCycleSheet extends StatelessWidget {
   final Member member;
@@ -28,7 +28,7 @@ class MonthlyCycleSheet extends StatelessWidget {
       final prepaid = await showModalBottomSheet<num?>(
         context: context,
         isScrollControlled: true,
-        builder: (_) => WalletTopUpSheet(member: member),
+        builder: (_) => PrepaidAmountSheet(member: member),
       );
 
       // لو المستخدم سكّر الشيت بدون إدخال قيمة، اعتبرها 0
