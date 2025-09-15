@@ -133,30 +133,9 @@ class DebtsRepo {
         .where('sessionId', isEqualTo: sessionId)
         .where('status', isEqualTo: 'open')
         .get();
-
-    final by = byName ??
-        (auth.currentUser?.email ?? auth.currentUser?.uid ?? 'system');
-
-    final batch = FirebaseFirestore.instance.batch();
     for (final d in qs.docs) {
-      final m = d.data();
-      final total = (m['amount'] ?? 0) as num;
-      final payments =
-          (m['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      final paid = payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
-      final remain = total - paid;
-      if (remain <= 0) continue;
-
-      payments.add({
-        'amount': remain,
-        'method': method,
-        'at': FieldValue.serverTimestamp(),
-        'by': by,
-      });
-
-      batch.update(d.reference, {'payments': payments, 'status': 'settled'});
+      await settleAll(d.id, method: method, byName: byName);
     }
-    await batch.commit();
   }
 
   /// Weekly
@@ -166,26 +145,9 @@ class DebtsRepo {
         .where('weeklyCycleId', isEqualTo: cycleId)
         .where('status', isEqualTo: 'open')
         .get();
-    final by = byName ??
-        (auth.currentUser?.email ?? auth.currentUser?.uid ?? 'system');
-    final batch = FirebaseFirestore.instance.batch();
     for (final d in qs.docs) {
-      final m = d.data();
-      final total = (m['amount'] ?? 0) as num;
-      final payments =
-          (m['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      final paid = payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
-      final remain = total - paid;
-      if (remain <= 0) continue;
-      payments.add({
-        'amount': remain,
-        'method': method,
-        'at': FieldValue.serverTimestamp(),
-        'by': by,
-      });
-      batch.update(d.reference, {'payments': payments, 'status': 'settled'});
+      await settleAll(d.id, method: method, byName: byName);
     }
-    await batch.commit();
   }
 
   /// Monthly
@@ -195,26 +157,9 @@ class DebtsRepo {
         .where('monthlyCycleId', isEqualTo: cycleId)
         .where('status', isEqualTo: 'open')
         .get();
-    final by = byName ??
-        (auth.currentUser?.email ?? auth.currentUser?.uid ?? 'system');
-    final batch = FirebaseFirestore.instance.batch();
     for (final d in qs.docs) {
-      final m = d.data();
-      final total = (m['amount'] ?? 0) as num;
-      final payments =
-          (m['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      final paid = payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
-      final remain = total - paid;
-      if (remain <= 0) continue;
-      payments.add({
-        'amount': remain,
-        'method': method,
-        'at': FieldValue.serverTimestamp(),
-        'by': by,
-      });
-      batch.update(d.reference, {'payments': payments, 'status': 'settled'});
+      await settleAll(d.id, method: method, byName: byName);
     }
-    await batch.commit();
   }
 
   /// يسدّد كل الديون المفتوحة المرتبطة بمرجع معيّن (جلسة/أسبوع/شهر)
@@ -224,8 +169,6 @@ class DebtsRepo {
     required String refId,
     required String method,
   }) async {
-    final uid = auth.currentUser?.uid ?? 'system';
-    final nowIso = DateTime.now().toIso8601String();
     Query<Map<String, dynamic>> query;
     if (refType == 'monthly') {
       query = _col.where('monthlyCycleId', isEqualTo: refId);
@@ -238,37 +181,9 @@ class DebtsRepo {
     }
 
     final q = await query.where('status', isEqualTo: 'open').get();
-
-    if (q.docs.isEmpty) return;
-
-    final batch = FirebaseFirestore.instance.batch();
-
     for (final d in q.docs) {
-      final m = d.data();
-      final total = (m['amount'] ?? 0) as num;
-
-      final payments = (m['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      final paidSoFar = payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
-      final due = total - paidSoFar;
-      if (due <= 0) {
-        batch.update(d.reference, {'status': 'settled'});
-        continue;
-      }
-
-      payments.add({
-        'amount': due,
-        'at': nowIso,
-        'by': uid,
-        'method': method, // لتقارير الكاش/التطبيق
-      });
-
-      batch.update(d.reference, {
-        'payments': payments,
-        'status': 'settled',
-      });
+      await settleAll(d.id, method: method);
     }
-
-    await batch.commit();
   }
 
 
@@ -333,58 +248,132 @@ class DebtsRepo {
     required num amount,
   }) async {
     final uid = auth.currentUser?.uid ?? 'system';
+
     await FirebaseFirestore.instance.runTransaction((tx) async {
       final ref = fs.doc('debts/$debtId');
+
+      // 1) READS أولًا
       final snap = await tx.get(ref);
       final m = snap.data() as Map<String, dynamic>?;
       if (m == null) return;
 
       final total = (m['amount'] ?? 0) as num;
-      final payments = (m['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      final paidSoFar = payments.fold<num>(0, (sum, p) => sum + (p['amount'] as num? ?? 0));
+      final List<Map<String, dynamic>> payments = ((m['payments'] as List?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      final paidSoFar = payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
       final newPaid = paidSoFar + amount;
-
-      payments.add({
-        'amount': amount,
-        'at': DateTime.now().toIso8601String(),
-        'by': uid,
-      });
-
+      final nowIso = DateTime.now().toIso8601String();
       final status = newPaid >= total ? 'settled' : 'open';
+
+      final memberId = (m['memberId'] as String?) ?? '';
+      final wRef = memberId.isNotEmpty ? fs.doc('wallets/$memberId') : null;
+      final wSnap = wRef != null ? await tx.get(wRef) : null; // READ قبل أي write
+
+      // حضّر الداتا بعد ما خلصت كل القراءات
+      final List<Map<String, dynamic>> newPayments = List.of(payments)
+        ..add({
+          'amount': amount,
+          'at': nowIso,
+          'by': uid,
+        });
+
+      num? currentWallet;
+      if (wSnap != null) {
+        currentWallet = (wSnap.data()?['balance'] ?? 0) as num;
+      }
+
+      // 2) WRITES بعد كل القراءات
       tx.update(ref, {
-        'payments': payments,
+        'payments': newPayments,
         'status': status,
       });
+
+      if (wRef != null && currentWallet != null && currentWallet < 0) {
+        final delta = amount > -currentWallet ? -currentWallet : amount;
+        if (delta > 0) {
+          tx.set(wRef, {
+            'balance': currentWallet + delta,
+            'lastBalanceAt': nowIso,
+          }, SetOptions(merge: true));
+
+          tx.set(fs.col('wallet_tx').doc(), {
+            'memberId': memberId,
+            'amount': delta,
+            'type': 'topup',
+            'note': 'Debt payment',
+            'refType': 'debt',
+            'refId': debtId,
+            'at': nowIso,
+          });
+        }
+      }
     });
   }
 
-  Future<void> settleAll(String debtId) async {
-    final uid = auth.currentUser?.uid ?? 'system';
+
+  Future<void> settleAll(String debtId, {String? method, String? byName}) async {
+    final by = byName ?? (auth.currentUser?.email ?? auth.currentUser?.uid ?? 'system');
+
     await FirebaseFirestore.instance.runTransaction((tx) async {
       final ref = fs.doc('debts/$debtId');
+
+      // 1) READS أولًا
       final snap = await tx.get(ref);
       final m = snap.data() as Map<String, dynamic>?;
       if (m == null) return;
 
       final total = (m['amount'] ?? 0) as num;
-      final payments = (m['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      final paidSoFar =
-      payments.fold<num>(0, (sum, p) => sum + (p['amount'] as num? ?? 0));
+      final List<Map<String, dynamic>> payments = ((m['payments'] as List?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      final paidSoFar = payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
       final remaining = total - paidSoFar;
+      final nowIso = DateTime.now().toIso8601String();
 
+      final memberId = (m['memberId'] as String?) ?? '';
+      final wRef = (memberId.isNotEmpty && remaining > 0) ? fs.doc('wallets/$memberId') : null;
+      final wSnap = wRef != null ? await tx.get(wRef) : null; // READ قبل أي write
+      final num? currentWallet = wSnap != null ? (wSnap.data()?['balance'] ?? 0) as num : null;
+
+      // حضّر داتا الكتابة
+      final List<Map<String, dynamic>> newPayments = List.of(payments);
       if (remaining > 0) {
-        payments.add({
+        newPayments.add({
           'amount': remaining,
-          'at': DateTime.now().toIso8601String(),
-          'by': uid,
+          if (method != null) 'method': method,
+          'at': nowIso,
+          'by': by,
         });
       }
 
+      // 2) WRITES بعد كل القراءات
       tx.update(ref, {
-        'payments': payments,
+        'payments': newPayments,
         'status': 'settled',
       });
-    });  }
+
+      if (wRef != null && currentWallet != null && currentWallet < 0 && remaining > 0) {
+        final delta = remaining > -currentWallet ? -currentWallet : remaining;
+        if (delta > 0) {
+          tx.set(wRef, {
+            'balance': currentWallet + delta,
+            'lastBalanceAt': nowIso,
+          }, SetOptions(merge: true));
+
+          tx.set(fs.col('wallet_tx').doc(), {
+            'memberId': memberId,
+            'amount': delta,
+            'type': 'topup',
+            'note': 'Debt payment',
+            'refType': 'debt',
+            'refId': debtId,
+            'at': nowIso,
+          });
+        }
+      }
+    });
+  }
 
   Future<void> delete(String debtId) async {
     await fs.delete('debts/$debtId');
