@@ -72,7 +72,7 @@ class MonthlyCyclesRepo {
 
   String _dateKey(DateTime d) => d.toIso8601String().substring(0,10); // YYYY-MM-DD
 
-  Future<num> _monthlyPriceFromSettings() async {
+  Future<num> _fetchMonthlyPrice() async {
     final s = await fs.getDoc('settings/app');
     final m = s.data();
     return (m?['prices']?['monthly'] ?? 0) as num;
@@ -96,10 +96,15 @@ class MonthlyCyclesRepo {
         .map((q) => q.docs.isEmpty ? null : MonthlyCycle.fromMap(q.docs.first.id, q.docs.first.data()));
   }
 
-  Future<String> startCycle({required String memberId, required String memberName}) async {
+  Future<String> startCycle({
+    required String memberId,
+    required String memberName,
+    num? price,
+    num? dayCost,
+  }) async {
     final uid = auth.currentUser?.uid ?? 'system';
-    final price = await _monthlyPriceFromSettings();
-    final dayCost = price / 26;
+    final p = price ?? await _fetchMonthlyPrice();
+    final dc = dayCost ?? p / 26;
 
     final doc = await _col.add({
       'memberId': memberId,
@@ -107,9 +112,9 @@ class MonthlyCyclesRepo {
       'days': 26,
       'drinksTotal': 0,
       'status': 'active',
-      'priceAtStart': price,
+      'priceAtStart': p,
       'memberName': memberName,
-      'dayCost': dayCost,
+      'dayCost': dc,
       'daysUsed': 0,
       'openDayId': null,
       'createdBy': uid,
@@ -177,7 +182,17 @@ class MonthlyCyclesRepo {
     required num prepaidAmount,
   }) async {
     // أنشئ الدورة
-    final cycleId = await startCycle(memberId: memberId, memberName: memberName);
+    // السعر الشهري مرة واحدة (للاستخدام في كل الخطوات)
+    final monthlyPrice = await _fetchMonthlyPrice();
+    final dayCost = monthlyPrice / 26;
+
+    // أنشئ الدورة مع تمرير السعر وتكلفة اليوم
+    final cycleId = await startCycle(
+      memberId: memberId,
+      memberName: memberName,
+      price: monthlyPrice,
+      dayCost: dayCost,
+    );
 
     // سجّل المقدم في المحفظة (إن وجد)
     if (prepaidAmount > 0) {
@@ -190,26 +205,14 @@ class MonthlyCyclesRepo {
       );
     }
 
-    // اقرأ السعر الشهري من الإعدادات
-    final s = await fs.getDoc('settings/app');
-    final settings = s.data();
-    final monthlyPrice = (settings?['prices']?['monthly'] ?? 0) as num;
-
-    // إذا المقدم أقل من السعر → أنشئ دين ثابت بالباقي (ولا نخصم شيء من المحفظة الآن)
-    final deficit = monthlyPrice - prepaidAmount;
-    if (deficit > 0) {
-      await fs.col('debts').add({
-        'memberId': memberId,
-        'memberName': memberName,
-        'amount': deficit,
-        'reason': 'Monthly fee (remaining)',
-        'status': 'open',
-        'createdAt': DateTime.now().toIso8601String(),
-        'refType': 'monthly',
-        'refId': cycleId,
-        'payments': <Map<String, dynamic>>[],
-      });
-    }
+    // خصم السعر الشهري من المحفظة مع السماح بالسالب (يُنشأ دين تلقائيًا عند عدم كفاية الرصيد)
+    await wallet.chargeAmountAllowNegative(
+      memberId: memberId,
+      cost: monthlyPrice,
+      reason: 'Monthly fee',
+      refType: 'monthly',
+      refId: cycleId,
+    );
 
     return cycleId;
   }
@@ -217,10 +220,20 @@ class MonthlyCyclesRepo {
 
 
   Future<void> closeOpenDay(String cycleId) async {
-    await FirebaseFirestore.instance.runTransaction((tx) async {
-      final cref = fs.doc('monthly_cycles/$cycleId');
+    // 1) استعلام خارج الترانزكشن للحصول على مرجع الدين (إن وُجد)
+    final preDebtQ = await fs
+        .col('debts')
+        .where('refType', isEqualTo: 'monthly')
+        .where('refId', isEqualTo: cycleId)
+        .limit(1)
+        .get();
 
+    final DocumentReference<Map<String, dynamic>>? debtRef =
+    preDebtQ.docs.isNotEmpty ? preDebtQ.docs.first.reference : null;
+
+    await FirebaseFirestore.instance.runTransaction((tx) async {
       // ===== READS =====
+      final cref = fs.doc('monthly_cycles/$cycleId');
       final csnap = await tx.get(cref);
       final c = csnap.data();
       if (c == null) return;
@@ -238,7 +251,7 @@ class MonthlyCyclesRepo {
       final memberId = (c['memberId'] ?? '') as String;
       final used = (c['daysUsed'] ?? 0) as int;
 
-      // تكلفة اليوم (نستخدمها فقط لمحاولة خصمها من المحفظة إن وُجد رصيد)
+      // تكلفة اليوم
       final num dayCost = (d['dayCost'] ?? c['dayCost'] ?? 0) as num;
 
       // رصيد المحفظة الحالي
@@ -246,7 +259,16 @@ class MonthlyCyclesRepo {
       final wSnap = await tx.get(wRef);
       final currentBal = (wSnap.data()?['balance'] ?? 0) as num;
 
-      // كم سنخصم؟ لا نتجاوز الرصيد الحالي، ولا نجعل الرصيد سالب بسبب اليوم
+      // اقرأ الدين (إن وُجد) الآن من داخل الترانزكشن باستخدام DocumentReference
+      Map<String, dynamic>? debt;
+      if (debtRef != null) {
+        final debtSnap = await tx.get(debtRef);
+        if (debtSnap.exists) {
+          debt = debtSnap.data();
+        }
+      }
+
+      // كم سنخصم؟ لا نجعل الرصيد سالب بسبب اليوم
       final toDeduct = (currentBal > 0)
           ? (currentBal >= dayCost ? dayCost : currentBal)
           : 0;
@@ -262,7 +284,7 @@ class MonthlyCyclesRepo {
         'daysUsed': used + 1,
       });
 
-      // خصم جزئي/كامل من المحفظة بما لا يجعلها سالبة
+      // خصم من المحفظة بدون سالب
       if (toDeduct > 0) {
         tx.set(wRef, {
           'balance': FieldValue.increment(-toDeduct),
@@ -278,12 +300,39 @@ class MonthlyCyclesRepo {
           'refId': cycleId,
           'at': now.toIso8601String(),
         });
+
+        // تخفيض الدين المرتبط بالدورة إن وُجد
+        if (debtRef != null && debt != null) {
+          final total = (debt['amount'] ?? 0) as num;
+          final payments =
+              (debt['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+          final paidSoFar =
+          payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
+          final remain = total - paidSoFar;
+          final payAmount = toDeduct >= remain ? remain : toDeduct;
+
+          if (payAmount > 0) {
+            payments.add({
+              'amount': payAmount,
+              'at': now.toIso8601String(),
+              'by': auth.currentUser?.uid ?? 'system',
+              'method': 'wallet',
+            });
+
+            final newStatus = (remain - payAmount) <= 0 ? 'settled' : 'open';
+            tx.update(debtRef, {
+              'payments': payments,
+              'status': newStatus,
+            });
+          }
+        }
       }
 
       // ⚠️ لا ننشئ دين جديد هنا إطلاقًا
-      // ✅ الدين (إن وُجد) ثابت وتم تسجيله عند بداية الدورة فقط.
+      // ✅ الدين لو موجود فهو مسجّل عند بداية الدورة فقط.
     });
   }
+
 
 
 

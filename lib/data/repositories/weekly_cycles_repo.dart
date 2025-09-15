@@ -1,7 +1,11 @@
+import 'dart:math';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+
 import '../services/firestore_service.dart';
 import '../services/auth_service.dart';
 import '../models/weekly_cycle.dart';
+import 'debts_repo.dart';
 import 'wallet_repo.dart';
 import 'weekly_days_repo.dart';
 
@@ -159,6 +163,13 @@ class WeeklyCyclesRepo {
       final used = (c['daysUsed'] ?? 0) as int;
       final dayCost = (d['dayCost'] ?? c['dayCost'] ?? 0) as num;
 
+      // اقرأ الرصيد قبل الخصم واحسب المبلغ الذي سنخصمه
+      final wRef = fs.doc('wallets/$memberId');
+      final wSnap = await tx.get(wRef);
+      final balance = (wSnap.data()?['balance'] ?? 0) as num;
+      final toDeduct = max(0, min(balance, dayCost));
+      final debtAmount = dayCost - toDeduct;
+
       // ====== WRITES تبدأ من هنا: لا مزيد من tx.get بعد الآن ======
 
       // أغلق اليوم
@@ -173,23 +184,37 @@ class WeeklyCyclesRepo {
         'daysUsed': used + 1,
       });
 
-      // خصم من المحفظة بدون قراءة سابقة
-      final wRef = fs.doc('wallets/$memberId');
-      tx.set(wRef, {
-        'balance': FieldValue.increment(-dayCost),
-      }, SetOptions(merge: true));
+      // خصم من المحفظة بالمبلغ الفعلي المتوفر
+      if (toDeduct > 0) {
+        tx.set(wRef, {
+          'balance': FieldValue.increment(-toDeduct),
+          'lastBalanceAt': now.toIso8601String(),
+        }, SetOptions(merge: true));
 
-      // سجل حركة المحفظة
-      tx.set(fs.col('wallet_tx').doc(), {
-        'memberId': memberId,
-        'memberName': (c['memberName'] ?? ''),
-        'amount': -dayCost,
-        'type': 'charge',
-        'note': 'weekly-day',
-        'refType': 'weekly',
-        'refId': cycleId,
-        'at': now.toIso8601String(),
-      });
+        // سجل حركة المحفظة
+        tx.set(fs.col('wallet_tx').doc(), {
+          'memberId': memberId,
+          'memberName': (c['memberName'] ?? ''),
+          'amount': -toDeduct,
+          'type': 'charge',
+          'note': 'weekly-day',
+          'refType': 'weekly',
+          'refId': cycleId,
+          'at': now.toIso8601String(),
+        });
+      }
+
+      if (debtAmount > 0) {
+        await DebtsRepo().createDebt(
+          memberId: memberId,
+          memberName: (c['memberName'] ?? ''),
+          amount: debtAmount,
+          reason: 'Weekly day deficit',
+          refType: 'weekly',
+          refId: cycleId,
+          tx: tx,
+        );
+      }
     });
   }
 

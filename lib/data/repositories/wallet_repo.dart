@@ -143,6 +143,7 @@ class WalletRepo {
         tx.set(debtRef, {
           'memberId': memberId,
           'amount': debt,
+          'memberName': memberName,
           'reason': '$refType:$refId',
           'status': 'open',
           'createdAt': now,
