@@ -149,6 +149,8 @@ class WalletRepo {
           'createdAt': now,
           'refType': refType,
           'refId': refId,
+          if (refType == 'monthly') 'monthlyCycleId': refId,
+          if (refType == 'weekly') 'weeklyCycleId': refId,
           'payments': <Map<String, dynamic>>[],
         });
       }
@@ -200,35 +202,44 @@ class WalletRepo {
     });
   }
 
-  /// يخصم المبلغ كله من المحفظة حتى لو أدى إلى رصيد سالب.
-  /// لو صار الرصيد سالب، ينشئ دين بالباقي (قيمة موجبة).
-  Future<void> chargeAmountAllowNegative({
+  /// لو صار الرصيد سالب، ينشئ دين بالباقي (قيمة موجبة) ويعيد نتيجة الخصم.
+  Future<WalletChargeResult> chargeAmountAllowNegative({
     required String memberId,
     required num cost,
-    required String reason,   // مثال: 'Monthly fee'
-    required String refType,  // 'monthly' | 'weekly' | 'session' ...
+    required String reason, // مثال: 'Monthly fee'
+    required String refType, // 'monthly' | 'weekly' | 'session' ...
     required String refId,
   }) async {
-    if (cost <= 0) return;
+    if (cost <= 0) {
+      final bal = await getBalanceOnce(memberId);
+      return WalletChargeResult(
+        deducted: 0,
+        debtCreated: 0,
+        preBalance: bal,
+        postBalance: bal,
+      );
+    }
 
     final now = DateTime.now().toIso8601String();
+
+    num pre = 0, post = 0, debtCreated = 0;
 
     await FirebaseFirestore.instance.runTransaction((tx) async {
       // 1) اقرأ المحفظة + اسم العضو للاستخدام في الدين
       final wRef = fs.doc('wallets/$memberId');
       final wSnap = await tx.get(wRef);
-      final current = (wSnap.data()?['balance'] ?? 0) as num;
+      pre = (wSnap.data()?['balance'] ?? 0) as num;
 
       final mRef = fs.doc('members/$memberId');
       final mSnap = await tx.get(mRef);
       final memberName = (mSnap.data()?['name'] as String?) ?? '';
 
       // 2) خصم كامل
-      final newBal = current - cost;
+      post = pre - cost;
 
       // 3) حدّث الرصيد (قد يصبح سالب)
       tx.set(wRef, {
-        'balance': newBal,
+        'balance': post,
         'lastBalanceAt': now,
       }, SetOptions(merge: true));
 
@@ -244,21 +255,30 @@ class WalletRepo {
       });
 
       // 5) إن صار سالب => أنشئ دين بالمقدار الموجب الباقي
-      if (newBal < 0) {
-        final debtAmount = -newBal; // قيمة موجبة
+      if (post < 0) {
+        debtCreated = -post; // قيمة موجبة
         tx.set(fs.col('debts').doc(), {
           'memberId': memberId,
           if (memberName.isNotEmpty) 'memberName': memberName,
-          'amount': debtAmount,
+          'amount': debtCreated,
           'reason': reason,
           'status': 'open',
           'createdAt': now,
           'refType': refType,
           'refId': refId,
+          if (refType == 'monthly') 'monthlyCycleId': refId,
+          if (refType == 'weekly') 'weeklyCycleId': refId,
           'payments': <Map<String, dynamic>>[],
         });
+
       }
     });
+    return WalletChargeResult(
+      deducted: cost,
+      debtCreated: debtCreated,
+      preBalance: pre,
+      postBalance: post,
+    );
   }
 
 

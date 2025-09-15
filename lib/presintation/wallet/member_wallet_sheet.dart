@@ -125,24 +125,21 @@ class MemberWalletSheet extends StatelessWidget {
                       if (ok == true) {
                         final v = num.tryParse(ctrl.text.trim()) ?? 0;
                         if (v > 0) {
-                          // تحقق من الرصيد الحالي قبل الخصم لمعرفة إن كان سيُنشأ دين
-                          final pre = await wallet.getBalance(member.id);
-                          // نستخدم topUp بقيمة سالبة كخصم حر غير مرتبط بدورة
-                          await wallet.topUp(memberId: member.id, amount: -v, note: 'خصم يدوي');
+                          final refId = fs.col('wallet_tx').doc().id;
+                          final result = await wallet.chargeAmountAllowNegative(
+                            memberId: member.id,
+                            cost: v,
+                            reason: 'Manual deduction',
+                            refType: 'manual',
+                            refId: refId,
+                          );
                           if (context.mounted) {
-                            if (pre < v) {
-                              final debt = v - pre;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                      'تم خصم الرصيد المتاح وإنشاء دين ₪ ${debt.toStringAsFixed(2)}'),
-                                ),
-                              );
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('تم خصم ₪ ${v.toStringAsFixed(2)}')),
-                              );
-                            }
+                             ScaffoldMessenger.of(context).showSnackBar(
+                               SnackBar(content: Text(
+                                 'الرصيد الجديد: ₪ ${result.postBalance.toStringAsFixed(2)}، الدين: ₪ ${result.debtCreated.toStringAsFixed(2)}',
+                               ),
+                               ),
+                               );
                           }
                         }
                       }

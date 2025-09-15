@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../../data/models/member.dart';
 import '../../../data/repositories/members_repo.dart';
-import '../../../data/repositories/balance_repo.dart';
+import '../../../data/repositories/wallet_repo.dart';
+import '../../../data/services/firestore_service.dart';
 import 'top_up_dialog.dart';
 
 class MemberDetailView extends StatelessWidget {
@@ -10,7 +11,8 @@ class MemberDetailView extends StatelessWidget {
   MemberDetailView({super.key, required this.memberId});
 
   final membersRepo = MembersRepo();
-  final balanceRepo = BalanceRepo();
+  final wallet = WalletRepo();
+  final fs = FirestoreService();
 
   @override
   Widget build(BuildContext context) {
@@ -31,7 +33,7 @@ class MemberDetailView extends StatelessWidget {
               title: Text(m.name),
               actions: [
                 StreamBuilder<num>(
-                  stream: balanceRepo.watchBalance(memberId),
+                  stream: wallet.watchBalance(memberId),
                   builder: (_, bSnap) {
                     final bal = (bSnap.data ?? m.balance).toStringAsFixed(2);
                     return Padding(
@@ -71,14 +73,16 @@ class MemberDetailView extends StatelessWidget {
                       builder: (_) => const TopUpDialog(),
                     );
                     if (amount != null && amount > 0) {
-                      await balanceRepo.addCreditTopUp(memberId: memberId, amount: amount);
+                      await wallet.topUp(memberId: memberId, amount: amount);
                       if (context.mounted) {
                         final a = amount.toStringAsFixed(2);
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Directionality(
-                            textDirection: TextDirection.rtl,
-                            child: Text('تم شحن ₪$a'),
-                          )),
+                          SnackBar(
+                            content: Directionality(
+                              textDirection: TextDirection.rtl,
+                              child: Text('تم شحن ₪$a'),
+                            ),
+                          ),
                         );
                       }
                     }
@@ -88,52 +92,59 @@ class MemberDetailView extends StatelessWidget {
               ],
             ),
             body: StreamBuilder(
-              stream: balanceRepo.watchTxByMember(memberId),
+              stream: fs
+                  .col('wallet_tx')
+                  .where('memberId', isEqualTo: memberId)
+                  .orderBy('at', descending: true)
+                  .limit(50)
+                  .snapshots(),
               builder: (context, txSnap) {
                 final list = txSnap.data ?? const [];
-                if (list.isEmpty) {
-                  return const Center(child: Text('لا توجد حركات رصيد بعد'));
+                if (!txSnap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final docs = txSnap.data!.docs;
+                if (docs.isEmpty) {
                 }
                 return ListView.separated(
                   padding: const EdgeInsets.all(12),
-                  itemCount: list.length,
+                  itemCount: docs.length,
                   separatorBuilder: (_, __) => const Divider(height: 0),
                   itemBuilder: (_, i) {
-                    final t = list[i];
-                    final sign = t.type == 'credit'
-                        ? '+'
-                        : t.type == 'debit'
-                        ? '-'
-                        : '±';
-                    final color = t.type == 'credit'
-                        ? Colors.green
-                        : t.type == 'debit'
-                        ? Colors.red
-                        : Colors.blueGrey;
-                    final ref = (t.refType != null && t.refId != null)
-                        ? ' (${t.refType}:${t.refId})'
+                    final m = docs[i].data();
+                    final type = (m['type'] ?? '') as String;
+                    final amount = (m['amount'] ?? 0) as num;
+                    final note = m['note'] as String?;
+                    final refType = m['refType'] as String?;
+                    final refId = m['refId'] as String?;
+                    final at = (m['at'] ?? '') as String;
+
+                    final isTopUp = type == 'topup';
+                    final sign = isTopUp ? '+' : '-';
+                    final color = isTopUp ? Colors.green : Colors.red;
+                    final ref = (refType != null &&
+                        refId != null &&
+                        refType.isNotEmpty &&
+                        refId.isNotEmpty)
+                        ? ' ($refType:$refId)'
                         : '';
-                    final amountStr = t.amount is num
-                        ? (t.amount as num).toStringAsFixed(2)
-                        : t.amount.toString();
+                    final amountStr = amount.abs().toStringAsFixed(2);
                     return ListTile(
                       leading: Icon(
-                        t.type == 'credit'
+                        isTopUp
                             ? Icons.arrow_downward_rounded
-                            : t.type == 'debit'
-                            ? Icons.arrow_upward_rounded
-                            : Icons.tune_rounded,
+                            : Icons.arrow_upward_rounded,
                         color: color,
                       ),
                       title: Directionality(
-                        textDirection: TextDirection.ltr, // لعرض الرمز والرقم بالترتيب
+                        textDirection: TextDirection.ltr,
                         child: Text('$sign₪$amountStr'),
                       ),
-                      subtitle: Text('${t.reason ?? '-'}$ref'),
+                      subtitle: Text('${note ?? '-'}$ref'),
                       trailing: Directionality(
                         textDirection: TextDirection.ltr, // التاريخ بصيغة يسار-يمين
                         child: Text(
-                          t.createdAt.toString().substring(0, 16),
+                          at.toString().substring(0, 16),
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ),

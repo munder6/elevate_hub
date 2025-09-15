@@ -58,7 +58,10 @@ class DebtsRepo {
       'createdAt': DateTime.now().toIso8601String(),
       if (refType != null) 'refType': refType,
       if (refId != null) 'refId': refId,
+      if (refType == 'monthly' && refId != null) 'monthlyCycleId': refId,
+      if (refType == 'weekly' && refId != null) 'weeklyCycleId': refId,
       'payments': <Map<String, dynamic>>[],
+
     };
 
     if (tx != null) {
@@ -223,12 +226,18 @@ class DebtsRepo {
   }) async {
     final uid = auth.currentUser?.uid ?? 'system';
     final nowIso = DateTime.now().toIso8601String();
+    Query<Map<String, dynamic>> query;
+    if (refType == 'monthly') {
+      query = _col.where('monthlyCycleId', isEqualTo: refId);
+    } else if (refType == 'weekly') {
+      query = _col.where('weeklyCycleId', isEqualTo: refId);
+    } else {
+      query = _col
+          .where('refType', isEqualTo: refType)
+          .where('refId', isEqualTo: refId);
+    }
 
-    final q = await _col
-        .where('refType', isEqualTo: refType)
-        .where('refId', isEqualTo: refId)
-        .where('status', isEqualTo: 'open')
-        .get();
+    final q = await query.where('status', isEqualTo: 'open').get();
 
     if (q.docs.isEmpty) return;
 
@@ -382,11 +391,17 @@ class DebtsRepo {
   }
 
   Future<num> openTotalByRef({required String refType, required String refId}) async {
-    final q = await _col
-        .where('refType', isEqualTo: refType)
-        .where('refId', isEqualTo: refId)
-        .where('status', isEqualTo: 'open')
-        .get();
+    Query<Map<String, dynamic>> query;
+    if (refType == 'monthly') {
+      query = _col.where('monthlyCycleId', isEqualTo: refId);
+    } else if (refType == 'weekly') {
+      query = _col.where('weeklyCycleId', isEqualTo: refId);
+    } else {
+      query = _col
+          .where('refType', isEqualTo: refType)
+          .where('refId', isEqualTo: refId);
+    }
+    final q = await query.where('status', isEqualTo: 'open').get();
     num total = 0;
     for (final d in q.docs) {
       final m = d.data();
