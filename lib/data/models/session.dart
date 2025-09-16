@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:elevate_hub/data/models/subscription_category.dart';
 
 class Session {
   final String id;
@@ -6,7 +7,7 @@ class Session {
   final DateTime checkInAt;
   final DateTime? checkOutAt;
   final int minutes; // المحسوبة بالتقريب
-  final num hourlyRateAtTime;
+  final num pricePerHourSnapshot;
   final num drinksTotal; // 0 الآن (هنربطه لاحقًا بالـ Orders)
   final num discount; // يدوي/كوبون لاحقًا
   final String paymentMethod; // cash | card | other | app | unpaid
@@ -15,6 +16,10 @@ class Session {
   final String status; // open | closed
   final String createdBy;
   final String? memberName;
+
+  final String? planId;
+  final SubscriptionCategory? category;
+  final num? bandwidthMbpsSnapshot;
 
   // حقول إثبات الدفع (جديدة)
   final String? paymentProofUrl;
@@ -27,7 +32,7 @@ class Session {
     required this.checkInAt,
     required this.checkOutAt,
     required this.minutes,
-    required this.hourlyRateAtTime,
+    required this.pricePerHourSnapshot,
     required this.drinksTotal,
     required this.discount,
     required this.paymentMethod,
@@ -36,6 +41,9 @@ class Session {
     required this.status,
     required this.createdBy,
     this.memberName,
+    this.planId,
+    this.category,
+    this.bandwidthMbpsSnapshot,
     this.paymentProofUrl,
     this.paymentProofUploadedAt,
     this.paymentProofUploadedBy,
@@ -48,7 +56,8 @@ class Session {
     checkInAt: DateTime.parse((m['checkInAt'] ?? DateTime.now().toIso8601String()) as String),
     checkOutAt: m['checkOutAt'] != null ? DateTime.parse(m['checkOutAt'] as String) : null,
     minutes: (m['minutes'] ?? 0) as int,
-    hourlyRateAtTime: (m['hourlyRateAtTime'] ?? 0) as num,
+    pricePerHourSnapshot:
+    (m['pricePerHourSnapshot'] ?? m['hourlyRateAtTime'] ?? 0) as num,
     drinksTotal: (m['drinksTotal'] ?? 0) as num,
     discount: (m['discount'] ?? 0) as num,
     paymentMethod: (m['paymentMethod'] ?? 'cash') as String,
@@ -56,6 +65,9 @@ class Session {
     grandTotal: (m['grandTotal'] ?? 0) as num,
     status: (m['status'] ?? 'open') as String,
     createdBy: (m['createdBy'] ?? '') as String,
+    planId: m['planId'] as String?,
+    category: subscriptionCategoryFromRaw(m['category']?.toString()),
+    bandwidthMbpsSnapshot: m['bandwidthMbpsSnapshot'] as num?,
     paymentProofUrl: m['paymentProofUrl'] as String?,
     paymentProofUploadedAt: m['paymentProofUploadedAt'] != null
         ? DateTime.tryParse(m['paymentProofUploadedAt'] as String)
@@ -69,7 +81,8 @@ class Session {
     'checkInAt': checkInAt.toIso8601String(),
     if (checkOutAt != null) 'checkOutAt': checkOutAt!.toIso8601String(),
     'minutes': minutes,
-    'hourlyRateAtTime': hourlyRateAtTime,
+    'hourlyRateAtTime': pricePerHourSnapshot,
+    'pricePerHourSnapshot': pricePerHourSnapshot,
     'drinksTotal': drinksTotal,
     'discount': discount,
     'paymentMethod': paymentMethod,
@@ -77,6 +90,10 @@ class Session {
     'grandTotal': grandTotal,
     'status': status,
     'createdBy': createdBy,
+    if (planId != null) 'planId': planId,
+    if (category != null) 'category': category!.rawValue,
+    if (bandwidthMbpsSnapshot != null)
+      'bandwidthMbpsSnapshot': bandwidthMbpsSnapshot,
 
     // حقول إثبات الدفع (اختيارية)
     if (paymentProofUrl != null) 'paymentProofUrl': paymentProofUrl,
@@ -84,4 +101,6 @@ class Session {
       'paymentProofUploadedAt': paymentProofUploadedAt!.toIso8601String(),
     if (paymentProofUploadedBy != null) 'paymentProofUploadedBy': paymentProofUploadedBy,
   };
+
+  num get hourlyRateAtTime => pricePerHourSnapshot;
 }

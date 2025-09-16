@@ -11,7 +11,9 @@ class MonthlyCycle {
   final int daysUsed;       // increments on day close
   final String? openDayId;  // current open day if any
   final String memberName;
-
+  final String? planId;
+  final num? bandwidthMbpsSnapshot;
+  final String? planTitleSnapshot;
   MonthlyCycle({
     required this.id,
     required this.memberId,
@@ -24,6 +26,9 @@ class MonthlyCycle {
     required this.dayCost,
     this.daysUsed = 0,
     this.openDayId,
+    this.planId,
+    this.bandwidthMbpsSnapshot,
+    this.planTitleSnapshot,
   });
 
   factory MonthlyCycle.fromMap(String id, Map<String, dynamic> m) => MonthlyCycle(
@@ -38,6 +43,9 @@ class MonthlyCycle {
     dayCost: (m['dayCost'] ?? 0) as num,
     daysUsed: (m['daysUsed'] ?? 0) as int,
     openDayId: m['openDayId'] as String?,
+    planId: m['planId'] as String?,
+    bandwidthMbpsSnapshot: m['bandwidthMbpsSnapshot'] as num?,
+    planTitleSnapshot: m['planTitleSnapshot'] as String?,
   );
 
   Map<String, dynamic> toMap() => {
@@ -51,5 +59,9 @@ class MonthlyCycle {
     'memberName': memberName,
     'daysUsed': daysUsed,
     if (openDayId != null) 'openDayId': openDayId,
+    if (planId != null) 'planId': planId,
+    if (bandwidthMbpsSnapshot != null)
+      'bandwidthMbpsSnapshot': bandwidthMbpsSnapshot,
+    if (planTitleSnapshot != null) 'planTitleSnapshot': planTitleSnapshot,
   };
 }

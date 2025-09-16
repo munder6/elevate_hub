@@ -8,15 +8,16 @@ import '../models/session.dart';
 import '../services/firestore_service.dart';
 import '../services/auth_service.dart';
 import 'debts_repo.dart';
-import 'settings_repo.dart';
 import 'balance_repo.dart'; // NEW
+import 'plans_repo.dart';
+import '../models/subscription_category.dart';
 
 /* ======================= Helpers & Models (top-level) ======================= */
 
 /// امتدادات نطاقات التاريخ (لازم تكون top-level، مش داخل كلاس)
 extension SessionsDateRanges on DateTime {
   DateTime get dayStart => DateTime(year, month, day);
-  DateTime get dayEnd   => DateTime(year, month, day, 23, 59, 59, 999);
+  DateTime get dayEnd => DateTime(year, month, day, 23, 59, 59, 999);
 
   /// ISO week (Mon-Sun) نبدأ الاثنين
   DateTime get weekStart {
@@ -24,6 +25,7 @@ extension SessionsDateRanges on DateTime {
     final start = dayStart.subtract(Duration(days: weekdayMon1 - 1));
     return DateTime(start.year, start.month, start.day);
   }
+
   DateTime get weekEnd => DateTime(
     weekStart.year,
     weekStart.month,
@@ -36,9 +38,8 @@ extension SessionsDateRanges on DateTime {
 
   DateTime get monthStart => DateTime(year, month, 1);
   DateTime get monthEnd {
-    final firstNext = (month == 12)
-        ? DateTime(year + 1, 1, 1)
-        : DateTime(year, month + 1, 1);
+    final firstNext =
+    (month == 12) ? DateTime(year + 1, 1, 1) : DateTime(year, month + 1, 1);
     // آخر لحظة من الشهر الحالي
     return firstNext.subtract(const Duration(milliseconds: 1));
   }
@@ -91,8 +92,8 @@ class SessionsRepo {
   final debts = DebtsRepo();
   final fs = FirestoreService();
   final auth = AuthService();
-  final settings = SettingsRepo();
   final balance = BalanceRepo(); // NEW
+  final plans = PlansRepo();
 
   CollectionReference<Map<String, dynamic>> get _col => fs.col('sessions');
 
@@ -102,19 +103,24 @@ class SessionsRepo {
     return rem == 0 ? mins : mins + (5 - rem);
   }
 
-  Future<num> _getHourly() async {
-    final snap = await fs.getDoc('settings/app');
-    final m = snap.data();
-    return (m?['prices']?['hourly'] ?? 0) as num;
-  }
-
   Future<String> startSession(
       String memberId, {
+        required String planId,
         String? memberName,
         DateTime? checkInAt, // جديد
       }) async {
     final uid = auth.currentUser?.uid ?? 'system';
-    final rate = await _getHourly();
+
+    // التحقق وجلب بيانات الخطة النشطة المسموح بها (بالساعات أو يومية)
+    final plan = await plans.requireActivePlan(
+      planId,
+      allowedCategories: const [
+        SubscriptionCategory.hours,
+        SubscriptionCategory.daily,
+      ],
+    );
+
+    final num rate = plan.price;
     final when = checkInAt ?? DateTime.now();
 
     final doc = await _col.add({
@@ -122,7 +128,11 @@ class SessionsRepo {
       if (memberName != null) 'memberName': memberName,
       'checkInAt': when.toIso8601String(), // ISO8601
       'minutes': 0,
-      'hourlyRateAtTime': rate,
+      'hourlyRateAtTime': rate, // احتفاظ قديم للتوافق
+      'pricePerHourSnapshot': rate, // اللقطة الجديدة للسعر
+      'planId': plan.id,
+      'category': plan.category.rawValue,
+      'bandwidthMbpsSnapshot': plan.bandwidthMbps,
       'drinksTotal': 0,
       'discount': 0,
       'paymentMethod': 'cash',
@@ -209,12 +219,18 @@ class SessionsRepo {
     final checkOut = DateTime.now();
 
     final minutes = _roundTo5Minutes(checkOut.difference(checkIn));
-    final rate = (data['hourlyRateAtTime'] ?? 0) as num;
+
+    // دعم الحقل الجديد pricePerHourSnapshot مع التوافق backward
+    final rate =
+    (data['pricePerHourSnapshot'] ?? data['hourlyRateAtTime'] ?? 0) as num;
+
     final drinks = (data['drinksTotal'] ?? 0) as num;
     final discount =
     manualDiscount > 0 ? manualDiscount : (data['discount'] ?? 0) as num;
 
-    final sessionAmount = (minutes / 60) * rate;
+    // فَوترة بالساعة مع التقريب للأعلى: أي جزء ساعة يحتسب ساعة كاملة
+    final int roundedHours = minutes <= 0 ? 0 : ((minutes + 59) ~/ 60);
+    final sessionAmount = roundedHours * rate;
     final grandTotal = sessionAmount + drinks - discount;
 
     await fs.update('sessions/$sessionId', {
@@ -267,9 +283,7 @@ class SessionsRepo {
 
     return qs.map((q) {
       final all = q.docs.map((d) => Session.fromMap(d.id, d.data())).toList();
-      return status == null
-          ? all
-          : all.where((s) => s.status == status).toList();
+      return status == null ? all : all.where((s) => s.status == status).toList();
     });
   }
 
@@ -306,6 +320,7 @@ class SessionsRepo {
     final now = DateTime.now();
     return watchSessionsBetween(now.weekStart, now.weekEnd, status: status);
   }
+
   Stream<List<Session>> watchThisMonth({String? status}) {
     final now = DateTime.now();
     return watchSessionsBetween(now.monthStart, now.monthEnd, status: status);
@@ -315,10 +330,12 @@ class SessionsRepo {
     final now = DateTime.now();
     return watchSummaryBetween(now.dayStart, now.dayEnd, status: status);
   }
+
   Stream<SessionsSummary> watchThisWeekSummary({String? status}) {
     final now = DateTime.now();
     return watchSummaryBetween(now.weekStart, now.weekEnd, status: status);
   }
+
   Stream<SessionsSummary> watchThisMonthSummary({String? status}) {
     final now = DateTime.now();
     return watchSummaryBetween(now.monthStart, now.monthEnd, status: status);

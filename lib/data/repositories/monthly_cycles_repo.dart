@@ -5,6 +5,9 @@ import '../services/auth_service.dart';
 import '../models/monthly_cycle.dart';
 import 'wallet_repo.dart';
 import 'monthly_days_repo.dart';
+import '../models/plan.dart';
+import '../models/subscription_category.dart';
+import 'plans_repo.dart';
 
 class MonthlyCloseResult {
   final num drinksTotal;
@@ -23,6 +26,7 @@ class MonthlyCyclesRepo {
   final wallet = WalletRepo();
   final daysRepo = MonthlyDaysRepo();
   final settings = SettingsRepo();
+  final plansRepo = PlansRepo();
 
 
   // Future<String> startWithPrepaidAndAutoCharge({
@@ -96,12 +100,57 @@ class MonthlyCyclesRepo {
         .map((q) => q.docs.isEmpty ? null : MonthlyCycle.fromMap(q.docs.first.id, q.docs.first.data()));
   }
 
+
+  Future<String> _createCycleFromPlan({
+    required String memberId,
+    required String memberName,
+    required Plan plan,
+  }) async {
+    if (plan.daysCount <= 0) {
+      throw Exception('Monthly plan must have daysCount > 0');
+    }
+    final uid = auth.currentUser?.uid ?? 'system';
+    final dayCost = plan.price / plan.daysCount;
+
+    final doc = await _col.add({
+      'memberId': memberId,
+      'startDate': DateTime.now().toIso8601String(),
+      'days': plan.daysCount,
+      'drinksTotal': 0,
+      'status': 'active',
+      'priceAtStart': plan.price,
+      'memberName': memberName,
+      'dayCost': dayCost,
+      'daysUsed': 0,
+      'openDayId': null,
+      'createdBy': uid,
+      'planId': plan.id,
+      'planTitleSnapshot': plan.title,
+      'bandwidthMbpsSnapshot': plan.bandwidthMbps,
+    });
+    return doc.id;
+  }
+
+
   Future<String> startCycle({
     required String memberId,
     required String memberName,
-    num? price,
-    num? dayCost,
+    String? planId,
+    @Deprecated('Use planId instead') num? price,
+    @Deprecated('Use planId instead') num? dayCost,
   }) async {
+    if (planId != null) {
+      final plan = await plansRepo.requireActivePlan(
+        planId,
+        allowedCategories: const [SubscriptionCategory.monthly],
+      );
+      return _createCycleFromPlan(
+        memberId: memberId,
+        memberName: memberName,
+        plan: plan,
+      );
+    }
+
     final uid = auth.currentUser?.uid ?? 'system';
     final p = price ?? await _fetchMonthlyPrice();
     final dc = dayCost ?? p / 26;
@@ -179,19 +228,21 @@ class MonthlyCyclesRepo {
   Future<String> startWithPrepaidAndAutoCharge({
     required String memberId,
     required String memberName,
+    required String planId,
     required num prepaidAmount,
   }) async {
     // أنشئ الدورة
     // السعر الشهري مرة واحدة (للاستخدام في كل الخطوات)
-    final monthlyPrice = await _fetchMonthlyPrice();
-    final dayCost = monthlyPrice / 26;
+    final plan = await plansRepo.requireActivePlan(
+      planId,
+      allowedCategories: const [SubscriptionCategory.monthly],
+    );
 
     // أنشئ الدورة مع تمرير السعر وتكلفة اليوم
-    final cycleId = await startCycle(
+    final cycleId = await _createCycleFromPlan(
       memberId: memberId,
       memberName: memberName,
-      price: monthlyPrice,
-      dayCost: dayCost,
+      plan: plan,
     );
 
     // سجّل المقدم في المحفظة (إن وجد)
@@ -208,7 +259,7 @@ class MonthlyCyclesRepo {
     // خصم السعر الشهري من المحفظة مع السماح بالسالب (يُنشأ دين تلقائيًا عند عدم كفاية الرصيد)
     await wallet.chargeAmountAllowNegative(
       memberId: memberId,
-      cost: monthlyPrice,
+      cost: plan.price,
       reason: 'Monthly fee',
       refType: 'monthly',
       refId: cycleId,

@@ -5,9 +5,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/firestore_service.dart';
 import '../services/auth_service.dart';
 import '../models/weekly_cycle.dart';
+import '../models/plan.dart';
+import '../models/subscription_category.dart';
 import 'debts_repo.dart';
 import 'wallet_repo.dart';
 import 'weekly_days_repo.dart';
+import 'plans_repo.dart';
 
 class WeeklyCloseResult {
   final num drinksTotal;
@@ -25,11 +28,12 @@ class WeeklyCyclesRepo {
   final auth = AuthService();
   final wallet = WalletRepo();
   final daysRepo = WeeklyDaysRepo();
+  final plansRepo = PlansRepo();
 
   CollectionReference<Map<String, dynamic>> get _col => fs.col('weekly_cycles');
   CollectionReference<Map<String, dynamic>> get _days => fs.col('weekly_days');
 
-  String _dateKey(DateTime d) => d.toIso8601String().substring(0,10); // YYYY-MM-DD
+  String _dateKey(DateTime d) => d.toIso8601String().substring(0, 10); // YYYY-MM-DD
 
   Future<num> _weeklyPriceFromSettings() async {
     final s = await fs.getDoc('settings/app');
@@ -45,13 +49,56 @@ class WeeklyCyclesRepo {
         .map((q) => q.docs.map((d) => WeeklyCycle.fromMap(d.id, d.data())).toList());
   }
 
-  /// يبدأ دورة أسبوعية وفق سعر الإعدادات — لا يخصم محفظة هنا.
+  Future<String> _createCycleFromPlan({
+    required String memberId,
+    required String memberName,
+    required Plan plan,
+  }) async {
+    if (plan.daysCount <= 0) {
+      throw Exception('Weekly plan must have daysCount > 0');
+    }
+    final uid = auth.currentUser?.uid ?? 'system';
+    final dayCost = plan.price / plan.daysCount;
+
+    final doc = await _col.add({
+      'memberId': memberId,
+      'startDate': DateTime.now().toIso8601String(),
+      'days': plan.daysCount,
+      'drinksTotal': 0,
+      'memberName': memberName,
+      'status': 'active',
+      'priceAtStart': plan.price,
+      'dayCost': dayCost,
+      'daysUsed': 0,
+      'openDayId': null,
+      'createdBy': uid,
+      'planId': plan.id,
+      'planTitleSnapshot': plan.title,
+      'bandwidthMbpsSnapshot': plan.bandwidthMbps,
+    });
+    return doc.id;
+  }
+
+  /// يبدأ دورة أسبوعية وفق الخطة المحددة أو يرجع للسعر القديم (Deprecated).
   Future<String> startCycle({
     required String memberId,
     required String memberName,
-    num? price,
-    num? dayCost,
+    String? planId,
+    @Deprecated('Use planId instead') num? price,
+    @Deprecated('Use planId instead') num? dayCost,
   }) async {
+    if (planId != null) {
+      final plan = await plansRepo.requireActivePlan(
+        planId,
+        allowedCategories: const [SubscriptionCategory.weekly],
+      );
+      return _createCycleFromPlan(
+        memberId: memberId,
+        memberName: memberName,
+        plan: plan,
+      );
+    }
+
     final uid = auth.currentUser?.uid ?? 'system';
     final p = price ?? await _weeklyPriceFromSettings();
     final dc = dayCost ?? p / 6;
@@ -75,16 +122,17 @@ class WeeklyCyclesRepo {
   Future<String> startWithPrepaidAndAutoCharge({
     required String memberId,
     required String memberName,
+    required String planId,
     required num prepaidAmount,
   }) async {
-    final weeklyPrice = await _weeklyPriceFromSettings();
-    final dayCost = weeklyPrice / 6;
-
-    final cycleId = await startCycle(
+    final plan = await plansRepo.requireActivePlan(
+      planId,
+      allowedCategories: const [SubscriptionCategory.weekly],
+    );
+    final cycleId = await _createCycleFromPlan(
       memberId: memberId,
       memberName: memberName,
-      price: weeklyPrice,
-      dayCost: dayCost,
+      plan: plan,
     );
 
     if (prepaidAmount > 0) {
@@ -99,7 +147,7 @@ class WeeklyCyclesRepo {
 
     await wallet.chargeAmountAllowNegative(
       memberId: memberId,
-      cost: weeklyPrice,
+      cost: plan.price,
       reason: 'Weekly fee',
       refType: 'weekly',
       refId: cycleId,
@@ -107,7 +155,6 @@ class WeeklyCyclesRepo {
 
     return cycleId;
   }
-
 
   /// يبدأ يوم جديد:
   /// - يمنع لو في يوم مفتوح
@@ -128,7 +175,9 @@ class WeeklyCyclesRepo {
       final cref = fs.doc('weekly_cycles/$cycleId');
       final csnap = await tx.get(cref);
       final c = csnap.data();
-      if (c == null) { throw Exception('Cycle not found'); }
+      if (c == null) {
+        throw Exception('Cycle not found');
+      }
 
       if ((c['status'] ?? 'active') != 'active') {
         throw Exception('Cycle is not active');
@@ -146,8 +195,6 @@ class WeeklyCyclesRepo {
       if (used >= days) {
         throw Exception('No remaining days.');
       }
-
-
 
       // أنشئ اليوم المفتوح (بدون خصم)
       final expectedCloseAt = now.add(const Duration(hours: 8));
@@ -221,10 +268,14 @@ class WeeklyCyclesRepo {
 
       // خصم من المحفظة بالمبلغ الفعلي المتوفر
       if (toDeduct > 0) {
-        tx.set(wRef, {
-          'balance': FieldValue.increment(-toDeduct),
-          'lastBalanceAt': now.toIso8601String(),
-        }, SetOptions(merge: true));
+        tx.set(
+          wRef,
+          {
+            'balance': FieldValue.increment(-toDeduct),
+            'lastBalanceAt': now.toIso8601String(),
+          },
+          SetOptions(merge: true),
+        );
 
         // سجل حركة المحفظة
         tx.set(fs.col('wallet_tx').doc(), {
@@ -260,9 +311,9 @@ class WeeklyCyclesRepo {
         .orderBy('startDate', descending: true)
         .limit(1)
         .snapshots()
-        .map((q) => q.docs.isEmpty ? null : WeeklyCycle.fromMap(q.docs.first.id, q.docs.first.data()));
+        .map((q) =>
+    q.docs.isEmpty ? null : WeeklyCycle.fromMap(q.docs.first.id, q.docs.first.data()));
   }
-
 
   /// أوتو-كلوز لو خلصت 8 ساعات
   Future<void> ensureAutoClose(String cycleId) async {

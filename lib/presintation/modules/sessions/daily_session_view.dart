@@ -13,6 +13,9 @@ import '../../../data/repositories/orders_repo.dart';
 import '../../../data/repositories/settings_repo.dart';
 import '../../../data/models/app_settings.dart';
 import '../../../data/services/auth_service.dart';
+import '../../../data/repositories/plans_repo.dart';
+import '../../../data/models/subscription_category.dart';
+import '../../../data/models/plan.dart';
 import 'widgets/add_order_sheet.dart';
 
 String sCurrency(num v) => '₪ ${v.toStringAsFixed(2)}';
@@ -31,23 +34,135 @@ class _DailySessionViewState extends State<DailySessionView> {
   final settingsRepo = SettingsRepo();
   final _debtsRepo = DebtsRepo();
   final _auth = AuthService();
+  final plansRepo = PlansRepo();
 
   String? openSessionId;
+  Session? openSession;
   StreamSubscription<List<Session>>? _openSub;
 
   @override
   void initState() {
     super.initState();
-    _openSub = sessionsRepo.watchMemberOpenSessions(widget.member.id).listen((sessions) {
-      if (!mounted) return;
-      setState(() => openSessionId = sessions.isNotEmpty ? sessions.first.id : null);
-    });
+    _openSub =
+        sessionsRepo.watchMemberOpenSessions(widget.member.id).listen((sessions) {
+          if (!mounted) return;
+          setState(() {
+            openSessionId = sessions.isNotEmpty ? sessions.first.id : null;
+            openSession = sessions.isNotEmpty ? sessions.first : null;
+          });
+        });
   }
 
   @override
   void dispose() {
     _openSub?.cancel();
     super.dispose();
+  }
+
+  Future<Plan?> _pickSessionPlan(BuildContext context) async {
+    final hoursPlans =
+    await plansRepo.fetchActiveByCategory(SubscriptionCategory.hours);
+    final dailyPlans =
+    await plansRepo.fetchActiveByCategory(SubscriptionCategory.daily);
+    final plans = [...hoursPlans, ...dailyPlans];
+    if (plans.isEmpty) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('لا توجد خطط مفعّلة للساعة/اليوم')),
+        );
+      }
+      return null;
+    }
+
+    plans.sort((a, b) => a.category.index.compareTo(b.category.index));
+    final preferredCategory = switch (widget.member.preferredPlan) {
+      'daily' => SubscriptionCategory.daily,
+      'hour' => SubscriptionCategory.hours,
+      _ => SubscriptionCategory.hours,
+    };
+    final defaultPlan = plans.firstWhere(
+          (p) => p.category == preferredCategory,
+      orElse: () => plans.first,
+    );
+
+    final selectedId = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        String current = defaultPlan.id;
+        return StatefulBuilder(
+          builder: (ctx, setModalState) => SafeArea(
+            child: Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 48,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Theme.of(ctx).dividerColor,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text('اختر الخطة', style: Theme.of(ctx).textTheme.titleMedium),
+                  const SizedBox(height: 12),
+                  ...plans.map(
+                        (plan) => RadioListTile<String>(
+                      value: plan.id,
+                      groupValue: current,
+                      onChanged: (v) =>
+                          setModalState(() => current = v ?? current),
+                      title: Text(plan.title),
+                      subtitle: Text(
+                        '${plan.category.label} • ₪ ${plan.price.toStringAsFixed(2)} • ${plan.bandwidthMbps} Mbps',
+                        textDirection: TextDirection.ltr,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('إلغاء'),
+                      ),
+                      const Spacer(),
+                      FilledButton.icon(
+                        onPressed: () => Navigator.pop(ctx, current),
+                        icon: const Icon(Icons.check_rounded),
+                        label: const Text('اختيار'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    if (selectedId == null) return null;
+    return plans.firstWhere((plan) => plan.id == selectedId,
+        orElse: () => plans.first);
+  }
+
+  String _planSummary(Session? session) {
+    if (session == null) return '—';
+    final parts = <String>[];
+    if (session.category != null) parts.add(session.category!.label);
+    if (session.bandwidthMbpsSnapshot != null) {
+      parts.add('${session.bandwidthMbpsSnapshot} Mbps');
+    }
+    parts.add('₪ ${session.pricePerHourSnapshot.toStringAsFixed(2)} / ساعة');
+    return parts.join(' • ');
   }
 
   Future<void> _addOrderFlow(BuildContext context) async {
@@ -88,7 +203,9 @@ class _DailySessionViewState extends State<DailySessionView> {
         child: Padding(
           padding: EdgeInsets.only(
             bottom: MediaQuery.of(context).viewInsets.bottom,
-            left: 16, right: 16, top: 16,
+            left: 16,
+            right: 16,
+            top: 16,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -98,7 +215,10 @@ class _DailySessionViewState extends State<DailySessionView> {
                 children: [
                   Container(
                     decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.primary.withOpacity(.12),
+                      color: Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withOpacity(.12),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     padding: const EdgeInsets.all(10),
@@ -134,15 +254,19 @@ class _DailySessionViewState extends State<DailySessionView> {
                             ListTile(
                               leading: const Icon(Icons.flash_on_rounded),
                               title: const Text('ابدأ الآن'),
-                              subtitle: const Text('تسجيل الوقت الحالي كوقت دخول'),
-                              onTap: () => Navigator.pop(ctx, _CheckInChoice.now),
+                              subtitle:
+                              const Text('تسجيل الوقت الحالي كوقت دخول'),
+                              onTap: () =>
+                                  Navigator.pop(ctx, _CheckInChoice.now),
                             ),
                             const Divider(height: 0),
                             ListTile(
                               leading: const Icon(Icons.schedule_rounded),
                               title: const Text('وقت مخصّص'),
-                              subtitle: const Text('اختر تاريخ/ساعة دخول سابقة'),
-                              onTap: () => Navigator.pop(ctx, _CheckInChoice.custom),
+                              subtitle:
+                              const Text('اختر تاريخ/ساعة دخول سابقة'),
+                              onTap: () =>
+                                  Navigator.pop(ctx, _CheckInChoice.custom),
                             ),
                             const SizedBox(height: 8),
                           ],
@@ -185,7 +309,9 @@ class _DailySessionViewState extends State<DailySessionView> {
                       if (dt.isAfter(DateTime.now())) {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('لا يمكن اختيار وقت في المستقبل')),
+                            const SnackBar(
+                                content:
+                                Text('لا يمكن اختيار وقت في المستقبل')),
                           );
                         }
                         return;
@@ -193,20 +319,26 @@ class _DailySessionViewState extends State<DailySessionView> {
                       checkInAt = dt;
                     }
 
+                    final plan = await _pickSessionPlan(context);
+                    if (plan == null) return;
+
                     final id = await sessionsRepo.startSession(
                       widget.member.id,
+                      planId: plan.id,
                       memberName: widget.member.name,
                       checkInAt: checkInAt,
                     );
 
                     if (context.mounted) {
-                      setState(() => openSessionId = id);
+                      setState(() {
+                        openSessionId = id;
+                      });
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
                           content: Text(
                             checkInAt == null
                                 ? 'تم بدء الجلسة الآن ✅'
-                                : 'تم بدء الجلسة بوقت: ${checkInAt.toString().substring(0,16)} ✅',
+                                : 'تم بدء الجلسة بوقت: ${checkInAt.toString().substring(0, 16)} ✅',
                           ),
                         ),
                       );
@@ -217,6 +349,16 @@ class _DailySessionViewState extends State<DailySessionView> {
                 ),
 
               if (isOpen) ...[
+                if (openSession != null) ...[
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'الخطة الحالية: ${_planSummary(openSession)}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 Row(
                   children: [
                     FilledButton.icon(
@@ -231,11 +373,13 @@ class _DailySessionViewState extends State<DailySessionView> {
                         if (sid == null) return;
 
                         // اقرأ الجلسة لحساب الملخّص
-                        final ds = await sessionsRepo.fs.getDoc('sessions/$sid');
+                        final ds =
+                        await sessionsRepo.fs.getDoc('sessions/$sid');
                         final m = ds.data();
                         if (m == null) return;
 
-                        final checkIn = DateTime.tryParse(m['checkInAt']?.toString() ?? '');
+                        final checkIn = DateTime.tryParse(
+                            m['checkInAt']?.toString() ?? '');
                         final now = DateTime.now();
                         int minutes = 0;
                         if (checkIn != null) {
@@ -243,7 +387,9 @@ class _DailySessionViewState extends State<DailySessionView> {
                           minutes = sessionsRepo.roundTo5ForUi(diff);
                         }
 
-                        final hourly = (m['hourlyRateAtTime'] ?? 0) as num;
+                        final hourly = (m['pricePerHourSnapshot'] ??
+                            m['hourlyRateAtTime'] ??
+                            0) as num;
                         final drinks = (m['drinksTotal'] ?? 0) as num;
                         final discount = (m['discount'] ?? 0) as num;
 
@@ -272,16 +418,21 @@ class _DailySessionViewState extends State<DailySessionView> {
 
                         // لو لم يُدفع → دين
                         if (res.paymentMethod == 'unpaid') {
-                          final stopped = await sessionsRepo.fs.getDoc('sessions/$sid');
+                          final stopped =
+                          await sessionsRepo.fs.getDoc('sessions/$sid');
                           final sm = stopped.data();
                           if (sm != null) {
                             final memberId = sm['memberId'] as String?;
-                            String memberName = (sm['memberName'] as String?) ?? '';
+                            String memberName =
+                                (sm['memberName'] as String?) ?? '';
                             if ((memberName.isEmpty) && memberId != null) {
                               try {
-                                final ms = await sessionsRepo.fs.getDoc('members/$memberId');
+                                final ms = await sessionsRepo.fs
+                                    .getDoc('members/$memberId');
                                 final mm = ms.data();
-                                if (mm != null) memberName = (mm['name'] as String?) ?? '';
+                                if (mm != null) {
+                                  memberName = (mm['name'] as String?) ?? '';
+                                }
                               } catch (_) {}
                             }
                             final grand = (sm['grandTotal'] ?? 0) as num;
@@ -304,7 +455,8 @@ class _DailySessionViewState extends State<DailySessionView> {
                                 await debtRef.set({
                                   ...data,
                                   'status': 'open',
-                                  'createdAt': DateTime.now().toIso8601String(),
+                                  'createdAt':
+                                  DateTime.now().toIso8601String(),
                                   'payments': <Map<String, dynamic>>[],
                                 });
                               }
@@ -364,9 +516,14 @@ class _DailySessionViewState extends State<DailySessionView> {
                             dense: true,
                             leading: CircleAvatar(
                               radius: 16,
-                              backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(.12),
+                              backgroundColor: Theme.of(context)
+                                  .colorScheme
+                                  .primary
+                                  .withOpacity(.12),
                               child: Icon(Icons.local_cafe_rounded,
-                                  size: 18, color: Theme.of(context).colorScheme.primary),
+                                  size: 18,
+                                  color:
+                                  Theme.of(context).colorScheme.primary),
                             ),
                             title: Text(
                               '${o.itemName} × ${o.qty}',
@@ -383,15 +540,20 @@ class _DailySessionViewState extends State<DailySessionView> {
                                 Text(
                                   'سعر الوحدة: ${sCurrency(o.unitPriceAtTime ?? 0)}  •  الإجمالي: ${sCurrency(o.total ?? 0)}',
                                   textDirection: TextDirection.rtl,
-                                  style: Theme.of(context).textTheme.bodySmall,
+                                  style:
+                                  Theme.of(context).textTheme.bodySmall,
                                 ),
                                 if (o.createdAt != null)
                                   Text(
-                                    'التاريخ: ${o.createdAt.toString().substring(0,16)}',
+                                    'التاريخ: ${o.createdAt.toString().substring(0, 16)}',
                                     style: Theme.of(context)
                                         .textTheme
                                         .bodySmall
-                                        ?.copyWith(color: Theme.of(context).colorScheme.onSurface.withOpacity(.7)),
+                                        ?.copyWith(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onSurface
+                                            .withOpacity(.7)),
                                   ),
                               ],
                             ),

@@ -11,6 +11,9 @@ class WeeklyCycle {
   final num dayCost;        // priceAtStart / days
   final int daysUsed;       // يزيد عند إغلاق اليوم
   final String? openDayId;  // يوم مفتوح حاليًا (إن وجد)
+  final String? planId;
+  final num? bandwidthMbpsSnapshot;
+  final String? planTitleSnapshot;
 
   WeeklyCycle({
     required this.id,
@@ -24,6 +27,9 @@ class WeeklyCycle {
     required this.dayCost,
     this.daysUsed = 0,
     this.openDayId,
+    this.planId,
+    this.bandwidthMbpsSnapshot,
+    this.planTitleSnapshot,
   });
 
   factory WeeklyCycle.fromMap(String id, Map<String, dynamic> m) => WeeklyCycle(
@@ -38,6 +44,9 @@ class WeeklyCycle {
     dayCost: (m['dayCost'] ?? 0) as num,
     daysUsed: (m['daysUsed'] ?? 0) as int,
     openDayId: m['openDayId'] as String?,
+    planId: m['planId'] as String?,
+    bandwidthMbpsSnapshot: m['bandwidthMbpsSnapshot'] as num?,
+    planTitleSnapshot: m['planTitleSnapshot'] as String?,
   );
 
   Map<String, dynamic> toMap() => {
@@ -51,5 +60,9 @@ class WeeklyCycle {
     'daysUsed': daysUsed,
     'memberName': memberName,
     if (openDayId != null) 'openDayId': openDayId,
+    if (planId != null) 'planId': planId,
+    if (bandwidthMbpsSnapshot != null)
+      'bandwidthMbpsSnapshot': bandwidthMbpsSnapshot,
+    if (planTitleSnapshot != null) 'planTitleSnapshot': planTitleSnapshot,
   };
 }

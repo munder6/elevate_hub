@@ -11,6 +11,7 @@ import 'widgets/edit_prices_dialog.dart';
 import 'widgets/edit_drink_dialog.dart';
 import 'widgets/edit_fixed_expense_dialog.dart';
 import 'widgets/edit_notes_bar_dialog.dart';
+import 'widgets/plans_list_dialog.dart';
 
 class SettingsView extends StatelessWidget {
   const SettingsView({super.key});
@@ -61,7 +62,8 @@ class SettingsView extends StatelessWidget {
                     weekly: result['weekly'],
                     monthly: result['monthly'],
                   );
-                  Get.snackbar('Saved', 'Prices updated', snackPosition: SnackPosition.BOTTOM);
+                  Get.snackbar('Saved', 'Prices updated',
+                      snackPosition: SnackPosition.BOTTOM);
                 }
               }
 
@@ -114,7 +116,8 @@ class SettingsView extends StatelessWidget {
               Future<void> editFixedExpense(int index) async {
                 final item = await showDialog<FixedExpenseItem>(
                   context: context,
-                  builder: (_) => EditFixedExpenseDialog(initial: s.fixedExpenses[index]),
+                  builder: (_) =>
+                      EditFixedExpenseDialog(initial: s.fixedExpenses[index]),
                 );
                 if (item != null) {
                   final list = [...s.fixedExpenses];
@@ -138,6 +141,7 @@ class SettingsView extends StatelessWidget {
                 }
               }
 
+              // TODO: حماية عمليات إدارة الخطط في قواعد الأمان (Firestore rules).
               return ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
@@ -145,21 +149,38 @@ class SettingsView extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Prices', style: Theme.of(context).textTheme.titleLarge),
-                      IconButton(onPressed: editPrices, icon: const Icon(Icons.edit)),
+                      Text('Prices',
+                          style: Theme.of(context).textTheme.titleLarge),
+                      IconButton(
+                          onPressed: editPrices,
+                          icon: const Icon(Icons.edit)),
                     ],
                   ),
                   Text('Hourly: ${s.hourly}'),
                   Text('Weekly: ${s.weekly}'),
                   Text('Monthly: ${s.monthly}'),
+                  ListTile(
+                    leading: const Icon(Icons.view_list_outlined),
+                    title: const Text('إدارة الخطط'),
+                    subtitle:
+                    const Text('تعديل وتفعيل خطط الأسعار حسب الفئة'),
+                    onTap: () => showDialog(
+                      context: context,
+                      builder: (_) => const PlansListDialog(),
+                    ),
+                  ),
+                  // TODO: زر للمشرف لتشغيل ترحيل migrate_plans_v1 عند الحاجة.
                   const Divider(height: 32),
 
                   // Drinks
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Drinks', style: Theme.of(context).textTheme.titleLarge),
-                      IconButton(onPressed: addDrink, icon: const Icon(Icons.add)),
+                      Text('Drinks',
+                          style: Theme.of(context).textTheme.titleLarge),
+                      IconButton(
+                          onPressed: addDrink,
+                          icon: const Icon(Icons.add)),
                     ],
                   ),
                   if (s.drinks.isEmpty)
@@ -192,8 +213,11 @@ class SettingsView extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Fixed Expenses', style: Theme.of(context).textTheme.titleLarge),
-                      IconButton(onPressed: addFixedExpense, icon: const Icon(Icons.add)),
+                      Text('Fixed Expenses',
+                          style: Theme.of(context).textTheme.titleLarge),
+                      IconButton(
+                          onPressed: addFixedExpense,
+                          icon: const Icon(Icons.add)),
                     ],
                   ),
                   if (s.fixedExpenses.isEmpty)
@@ -217,12 +241,17 @@ class SettingsView extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Top Notes Bar', style: Theme.of(context).textTheme.titleLarge),
-                      IconButton(onPressed: editNotesBar, icon: const Icon(Icons.edit)),
+                      Text('Top Notes Bar',
+                          style: Theme.of(context).textTheme.titleLarge),
+                      IconButton(
+                          onPressed: editNotesBar,
+                          icon: const Icon(Icons.edit)),
                     ],
                   ),
                   Text(
-                    s.notesBar.text.isNotEmpty ? s.notesBar.text : 'No active note',
+                    s.notesBar.text.isNotEmpty
+                        ? s.notesBar.text
+                        : 'No active note',
                   ),
                 ],
               );
