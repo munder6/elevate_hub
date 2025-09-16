@@ -1,18 +1,13 @@
-import 'dart:async';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:elevate_hub/presintation/modules/sessions/widgets/close_daily_sheet.dart';
+import 'dart:async';import 'package:elevate_hub/presintation/modules/sessions/widgets/close_daily_sheet.dart';
 import 'package:elevate_hub/presintation/modules/sessions/widgets/session_receipt_sheet.dart';
 import 'package:flutter/material.dart';
 
 import '../../../data/models/member.dart';
 import '../../../data/models/session.dart';
 import '../../../data/models/order.dart';
-import '../../../data/repositories/debts_repo.dart';
 import '../../../data/repositories/sessions_repo.dart';
 import '../../../data/repositories/orders_repo.dart';
 import '../../../data/repositories/settings_repo.dart';
-import '../../../data/models/app_settings.dart';
-import '../../../data/services/auth_service.dart';
 import '../../../data/repositories/plans_repo.dart';
 import '../../../data/models/subscription_category.dart';
 import '../../../data/models/plan.dart';
@@ -32,8 +27,6 @@ class _DailySessionViewState extends State<DailySessionView> {
   final sessionsRepo = SessionsRepo();
   final ordersRepo = OrdersRepo();
   final settingsRepo = SettingsRepo();
-  final _debtsRepo = DebtsRepo();
-  final _auth = AuthService();
   final plansRepo = PlansRepo();
 
   String? openSessionId;
@@ -157,12 +150,36 @@ class _DailySessionViewState extends State<DailySessionView> {
   String _planSummary(Session? session) {
     if (session == null) return '—';
     final parts = <String>[];
-    if (session.category != null) parts.add(session.category!.label);
-    if (session.bandwidthMbpsSnapshot != null) {
-      parts.add('${session.bandwidthMbpsSnapshot} Mbps');
+    final category = session.category;
+    if (category != null) {
+      parts.add(category.label);
     }
-    parts.add('₪ ${session.pricePerHourSnapshot.toStringAsFixed(2)} / ساعة');
-    return parts.join(' • ');
+
+    final bandwidth = session.bandwidthMbpsSnapshot;
+    if (bandwidth != null) {
+      final formattedBandwidth =
+      bandwidth % 1 == 0 ? bandwidth.toInt().toString() : bandwidth.toString();
+      parts.add('$formattedBandwidth Mbps');
+    }
+
+    final price = session.pricePerHourSnapshot;
+    final unit = () {
+      switch (category) {
+        case SubscriptionCategory.daily:
+          return ' / يوم';
+        case SubscriptionCategory.hours:
+          return ' / ساعة';
+        case SubscriptionCategory.weekly:
+          return ' / أسبوع';
+        case SubscriptionCategory.monthly:
+          return ' / شهر';
+        default:
+          return '';
+      }
+    }();
+    parts.add('₪ ${price.toStringAsFixed(2)}$unit');
+
+    return parts.isEmpty ? '—' : parts.join(' • ');
   }
 
   Future<void> _addOrderFlow(BuildContext context) async {
@@ -387,9 +404,11 @@ class _DailySessionViewState extends State<DailySessionView> {
                           minutes = sessionsRepo.roundTo5ForUi(diff);
                         }
 
-                        final hourly = (m['pricePerHourSnapshot'] ??
-                            m['hourlyRateAtTime'] ??
-                            0) as num;
+                        final dynamic priceSnapshot =
+                            m['pricePerHourSnapshot'] ?? m['hourlyRateAtTime'] ?? 0;
+                        final num hourly = priceSnapshot is num
+                            ? priceSnapshot
+                            : num.tryParse(priceSnapshot.toString()) ?? 0;
                         final drinks = (m['drinksTotal'] ?? 0) as num;
                         final discount = (m['discount'] ?? 0) as num;
 
@@ -416,64 +435,7 @@ class _DailySessionViewState extends State<DailySessionView> {
                           manualDiscount: res.discount,
                         );
 
-                        // لو لم يُدفع → دين
-                        if (res.paymentMethod == 'unpaid') {
-                          final stopped =
-                          await sessionsRepo.fs.getDoc('sessions/$sid');
-                          final sm = stopped.data();
-                          if (sm != null) {
-                            final memberId = sm['memberId'] as String?;
-                            String memberName =
-                                (sm['memberName'] as String?) ?? '';
-                            if ((memberName.isEmpty) && memberId != null) {
-                              try {
-                                final ms = await sessionsRepo.fs
-                                    .getDoc('members/$memberId');
-                                final mm = ms.data();
-                                if (mm != null) {
-                                  memberName = (mm['name'] as String?) ?? '';
-                                }
-                              } catch (_) {}
-                            }
-                            final grand = (sm['grandTotal'] ?? 0) as num;
 
-                            if (memberId != null && grand > 0) {
-                              final debtRef =
-                              sessionsRepo.fs.doc('debts/session_$sid');
-                              final ds = await debtRef.get();
-                              final data = {
-                                'amount': grand,
-                                'reason': 'جلسة يومية غير مدفوعة',
-                                'memberId': memberId,
-                                'memberName': memberName,
-                                'refType': 'session',
-                                'refId': sid,
-                              };
-                              if (ds.exists) {
-                                await debtRef.set(data, SetOptions(merge: true));
-                              } else {
-                                await debtRef.set({
-                                  ...data,
-                                  'status': 'open',
-                                  'createdAt':
-                                  DateTime.now().toIso8601String(),
-                                  'payments': <Map<String, dynamic>>[],
-                                });
-                              }
-
-                              final q = await sessionsRepo.fs
-                                  .col('debts')
-                                  .where('refType', isEqualTo: 'session')
-                                  .where('refId', isEqualTo: sid)
-                                  .get();
-                              for (final d in q.docs) {
-                                if (d.id != 'session_$sid') {
-                                  await d.reference.delete();
-                                }
-                              }
-                            }
-                          }
-                        }
 
                         if (!mounted) return;
 

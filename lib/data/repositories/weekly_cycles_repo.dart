@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../services/firestore_service.dart';
@@ -7,7 +5,6 @@ import '../services/auth_service.dart';
 import '../models/weekly_cycle.dart';
 import '../models/plan.dart';
 import '../models/subscription_category.dart';
-import 'debts_repo.dart';
 import 'wallet_repo.dart';
 import 'weekly_days_repo.dart';
 import 'plans_repo.dart';
@@ -221,12 +218,11 @@ class WeeklyCyclesRepo {
 
   /// إغلاق اليوم المفتوح (يدويًا أو تلقائيًا):
   /// - يغلق اليوم ويُصفر openDayId
-  /// - يزيد daysUsed
-  /// - يخصم dayCost من المحفظة ويسجل wallet_tx
+  /// - يزيد daysUsed فقط بدون أي عمليات مالية
   Future<void> closeOpenDay(String cycleId) async {
     await FirebaseFirestore.instance.runTransaction((tx) async {
       final cref = fs.doc('weekly_cycles/$cycleId');
-      final csnap = await tx.get(cref); // READ 1
+      final csnap = await tx.get(cref);
       final c = csnap.data();
       if (c == null) return;
 
@@ -234,27 +230,14 @@ class WeeklyCyclesRepo {
       if (openDayId == null) return;
 
       final dref = fs.doc('weekly_days/$openDayId');
-      final dsnap = await tx.get(dref); // READ 2
+      final dsnap = await tx.get(dref);
       final d = dsnap.data();
       if (d == null) return;
       if ((d['status'] ?? 'open') != 'open') return;
 
-      // حضّر كل القيم قبل أي كتابة
-      final now = DateTime.now();
-      final memberId = (c['memberId'] ?? '') as String;
       final used = (c['daysUsed'] ?? 0) as int;
-      final dayCost = (d['dayCost'] ?? c['dayCost'] ?? 0) as num;
+      final now = DateTime.now();
 
-      // اقرأ الرصيد قبل الخصم واحسب المبلغ الذي سنخصمه
-      final wRef = fs.doc('wallets/$memberId');
-      final wSnap = await tx.get(wRef);
-      final balance = (wSnap.data()?['balance'] ?? 0) as num;
-      final toDeduct = max(0, min(balance, dayCost));
-      final debtAmount = dayCost - toDeduct;
-
-      // ====== WRITES تبدأ من هنا: لا مزيد من tx.get بعد الآن ======
-
-      // أغلق اليوم
       tx.update(dref, {
         'status': 'closed',
         'stopAt': now.toIso8601String(),
@@ -265,42 +248,6 @@ class WeeklyCyclesRepo {
         'openDayId': null,
         'daysUsed': used + 1,
       });
-
-      // خصم من المحفظة بالمبلغ الفعلي المتوفر
-      if (toDeduct > 0) {
-        tx.set(
-          wRef,
-          {
-            'balance': FieldValue.increment(-toDeduct),
-            'lastBalanceAt': now.toIso8601String(),
-          },
-          SetOptions(merge: true),
-        );
-
-        // سجل حركة المحفظة
-        tx.set(fs.col('wallet_tx').doc(), {
-          'memberId': memberId,
-          'memberName': (c['memberName'] ?? ''),
-          'amount': -toDeduct,
-          'type': 'charge',
-          'note': 'weekly-day',
-          'refType': 'weekly',
-          'refId': cycleId,
-          'at': now.toIso8601String(),
-        });
-      }
-
-      if (debtAmount > 0) {
-        await DebtsRepo().createDebt(
-          memberId: memberId,
-          memberName: (c['memberName'] ?? ''),
-          amount: debtAmount,
-          reason: 'Weekly day deficit',
-          refType: 'weekly',
-          refId: cycleId,
-          tx: tx,
-        );
-      }
     });
   }
 

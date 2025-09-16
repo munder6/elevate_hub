@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:elevate_hub/data/repositories/settings_repo.dart';
 import '../services/firestore_service.dart';
 import '../services/auth_service.dart';
 import '../models/monthly_cycle.dart';
@@ -25,7 +24,6 @@ class MonthlyCyclesRepo {
   final auth = AuthService();
   final wallet = WalletRepo();
   final daysRepo = MonthlyDaysRepo();
-  final settings = SettingsRepo();
   final plansRepo = PlansRepo();
 
 
@@ -271,19 +269,7 @@ class MonthlyCyclesRepo {
 
 
   Future<void> closeOpenDay(String cycleId) async {
-    // 1) استعلام خارج الترانزكشن للحصول على مرجع الدين (إن وُجد)
-    final preDebtQ = await fs
-        .col('debts')
-        .where('refType', isEqualTo: 'monthly')
-        .where('refId', isEqualTo: cycleId)
-        .limit(1)
-        .get();
-
-    final DocumentReference<Map<String, dynamic>>? debtRef =
-    preDebtQ.docs.isNotEmpty ? preDebtQ.docs.first.reference : null;
-
     await FirebaseFirestore.instance.runTransaction((tx) async {
-      // ===== READS =====
       final cref = fs.doc('monthly_cycles/$cycleId');
       final csnap = await tx.get(cref);
       final c = csnap.data();
@@ -298,89 +284,18 @@ class MonthlyCyclesRepo {
       if (d == null) return;
       if ((d['status'] ?? 'open') != 'open') return;
 
-      final now = DateTime.now();
-      final memberId = (c['memberId'] ?? '') as String;
       final used = (c['daysUsed'] ?? 0) as int;
+      final now = DateTime.now();
 
-      // تكلفة اليوم
-      final num dayCost = (d['dayCost'] ?? c['dayCost'] ?? 0) as num;
-
-      // رصيد المحفظة الحالي
-      final wRef = fs.doc('wallets/$memberId');
-      final wSnap = await tx.get(wRef);
-      final currentBal = (wSnap.data()?['balance'] ?? 0) as num;
-
-      // اقرأ الدين (إن وُجد) الآن من داخل الترانزكشن باستخدام DocumentReference
-      Map<String, dynamic>? debt;
-      if (debtRef != null) {
-        final debtSnap = await tx.get(debtRef);
-        if (debtSnap.exists) {
-          debt = debtSnap.data();
-        }
-      }
-
-      // كم سنخصم؟ لا نجعل الرصيد سالب بسبب اليوم
-      final toDeduct = (currentBal > 0)
-          ? (currentBal >= dayCost ? dayCost : currentBal)
-          : 0;
-
-      // ===== WRITES =====
-      // إغلاق اليوم + زيادة daysUsed
       tx.update(dref, {
         'status': 'closed',
         'stopAt': now.toIso8601String(),
       });
+
       tx.update(cref, {
         'openDayId': null,
         'daysUsed': used + 1,
       });
-
-      // خصم من المحفظة بدون سالب
-      if (toDeduct > 0) {
-        tx.set(wRef, {
-          'balance': FieldValue.increment(-toDeduct),
-          'lastBalanceAt': now.toIso8601String(),
-        }, SetOptions(merge: true));
-
-        tx.set(fs.col('wallet_tx').doc(), {
-          'memberId': memberId,
-          'amount': -toDeduct,
-          'type': 'charge',
-          'note': 'monthly-day',
-          'refType': 'monthly',
-          'refId': cycleId,
-          'at': now.toIso8601String(),
-        });
-
-        // تخفيض الدين المرتبط بالدورة إن وُجد
-        if (debtRef != null && debt != null) {
-          final total = (debt['amount'] ?? 0) as num;
-          final payments =
-              (debt['payments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-          final paidSoFar =
-          payments.fold<num>(0, (s, p) => s + ((p['amount'] as num?) ?? 0));
-          final remain = total - paidSoFar;
-          final payAmount = toDeduct >= remain ? remain : toDeduct;
-
-          if (payAmount > 0) {
-            payments.add({
-              'amount': payAmount,
-              'at': now.toIso8601String(),
-              'by': auth.currentUser?.uid ?? 'system',
-              'method': 'wallet',
-            });
-
-            final newStatus = (remain - payAmount) <= 0 ? 'settled' : 'open';
-            tx.update(debtRef, {
-              'payments': payments,
-              'status': newStatus,
-            });
-          }
-        }
-      }
-
-      // ⚠️ لا ننشئ دين جديد هنا إطلاقًا
-      // ✅ الدين لو موجود فهو مسجّل عند بداية الدورة فقط.
     });
   }
 

@@ -120,7 +120,9 @@ class SessionsRepo {
       ],
     );
 
-    final num rate = plan.price;
+    final num rate = plan.category == SubscriptionCategory.hours
+        ? plan.price
+        : plan.dayCostSnapshot;
     final when = checkInAt ?? DateTime.now();
 
     final doc = await _col.add({
@@ -243,8 +245,61 @@ class SessionsRepo {
       'status': 'closed',
     });
 
-    // تسوية ديون تلقائية لو مش unpaid
-    if (paymentMethod != 'unpaid') {
+    final memberId = (data['memberId'] as String?) ?? '';
+    String memberName = (data['memberName'] as String?) ?? '';
+    if (memberName.isEmpty && memberId.isNotEmpty) {
+      try {
+        final ms = await fs.getDoc('members/$memberId');
+        memberName = (ms.data()?['name'] as String?) ?? '';
+      } catch (_) {}
+    }
+
+    final debtDocId = 'session_$sessionId';
+    final debtRef = fs.doc('debts/$debtDocId');
+
+    if (paymentMethod == 'unpaid') {
+      if (grandTotal > 0 && memberId.isNotEmpty) {
+        final nowIso = DateTime.now().toIso8601String();
+        await FirebaseFirestore.instance.runTransaction((tx) async {
+          final snap = await tx.get(debtRef);
+          final existing = snap.data();
+          final createdAt = existing?['createdAt']?.toString() ?? nowIso;
+          final List<Map<String, dynamic>> payments = ((existing?['payments'] as List?) ?? [])
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+
+          tx.set(
+            debtRef,
+            {
+              'memberId': memberId,
+              'memberName': memberName,
+              'amount': grandTotal,
+              'reason': 'جلسة يومية غير مدفوعة',
+              'status': 'open',
+              'createdAt': createdAt,
+              'refType': 'session',
+              'refId': sessionId,
+              'payments': payments,
+              'sessionId': sessionId,
+            },
+            SetOptions(merge: true),
+          );
+        });
+
+        try {
+          final q = await fs
+              .col('debts')
+              .where('refType', isEqualTo: 'session')
+              .where('refId', isEqualTo: sessionId)
+              .get();
+          for (final d in q.docs) {
+            if (d.id != debtDocId) {
+              await d.reference.delete();
+            }
+          }
+        } catch (_) {}
+      }
+    } else {
       try {
         await debts.settleByRef(
           refType: 'session',

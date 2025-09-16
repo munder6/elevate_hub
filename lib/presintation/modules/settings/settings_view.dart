@@ -42,11 +42,63 @@ class SettingsView extends StatelessWidget {
           return StreamBuilder<AppSettings?>(
             stream: repo.watchSettings(),
             builder: (context, snap) {
-              if (!snap.hasData) {
+              // ===== زر Seed جاهز دائماً (حتى لو مافي Settings لسه) =====
+              Future<void> seedSettings() async {
+                await repo.ensureExists(); // <-- مهم جداً
+
+                await repo.updatePrices(hourly: 5, weekly: 100, monthly: 300);
+
+                await repo.updateDrinks([
+                  DrinkItem(name: "Espresso", price: 7, active: true),
+                  DrinkItem(name: "Cappuccino", price: 10, active: true),
+                ]);
+
+                await repo.updateFixedExpenses([
+                  FixedExpenseItem(name: "Rent", amount: 500),
+                  FixedExpenseItem(name: "Electricity", amount: 200),
+                ]);
+
+                await repo.updateNotesBar(
+                  NotesBar(
+                    text: "Welcome to Elevate Hub ☕",
+                    priority: "info",
+                    active: true,
+                    startAt: DateTime.now(),
+                    endAt: DateTime.now().add(const Duration(days: 7)),
+                  ),
+                );
+              }
+
+              // حالة الانتظار فقط لما لسه عم يعمل subscribe؛
+              // أما لو استلمنا Data == null فنعرض زر Seed بدلاً من لودينغ أبدي.
+              if (snap.connectionState == ConnectionState.waiting &&
+                  !snap.hasData) {
                 return const Center(child: CircularProgressIndicator());
               }
-              final s = snap.data!;
 
+              final s = snap.data; // قد تكون null أول مرة
+
+              // ===== حالة عدم وجود إعدادات: أظهر زر Seed وشوية تلميحات =====
+              if (s == null) {
+                return ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    ListTile(
+                      leading: const Icon(Icons.cloud_upload),
+                      title: const Text("Seed Default Settings"),
+                      subtitle: const Text(
+                          "Initialize default prices, drinks, expenses, and notes"),
+                      onTap: seedSettings,
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'No settings document found. Use the button above to create initial settings.',
+                    ),
+                  ],
+                );
+              }
+
+              // ===== عند توفر الإعدادات: اعرض الشاشة الكاملة =====
               Future<void> editPrices() async {
                 final result = await showDialog<Map<String, num>>(
                   context: context,
@@ -93,7 +145,8 @@ class SettingsView extends StatelessWidget {
               Future<void> toggleDrink(int index, bool v) async {
                 final list = [...s.drinks];
                 final d = list[index];
-                list[index] = DrinkItem(name: d.name, price: d.price, active: v);
+                list[index] =
+                    DrinkItem(name: d.name, price: d.price, active: v);
                 await repo.updateDrinks(list);
               }
 
@@ -145,6 +198,16 @@ class SettingsView extends StatelessWidget {
               return ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
+                  // زر الـ Seed يظهر دائمًا حتى بعد وجود إعدادات
+                  ListTile(
+                    leading: const Icon(Icons.cloud_upload),
+                    title: const Text("Seed Default Settings"),
+                    subtitle: const Text(
+                        "Initialize default prices, drinks, expenses, and notes"),
+                    onTap: seedSettings,
+                  ),
+                  const Divider(height: 32),
+
                   // Prices
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -162,8 +225,7 @@ class SettingsView extends StatelessWidget {
                   ListTile(
                     leading: const Icon(Icons.view_list_outlined),
                     title: const Text('إدارة الخطط'),
-                    subtitle:
-                    const Text('تعديل وتفعيل خطط الأسعار حسب الفئة'),
+                    subtitle: const Text('تعديل وتفعيل خطط الأسعار حسب الفئة'),
                     onTap: () => showDialog(
                       context: context,
                       builder: (_) => const PlansListDialog(),
@@ -228,7 +290,8 @@ class SettingsView extends StatelessWidget {
                   for (int i = 0; i < s.fixedExpenses.length; i++)
                     ListTile(
                       title: Text(s.fixedExpenses[i].name),
-                      subtitle: Text('Amount: ${s.fixedExpenses[i].amount}'),
+                      subtitle:
+                      Text('Amount: ${s.fixedExpenses[i].amount}'),
                       onTap: () => editFixedExpense(i),
                       trailing: IconButton(
                         onPressed: () => removeFixedExpense(i),
