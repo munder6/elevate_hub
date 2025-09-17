@@ -7,6 +7,7 @@ import '../../../data/models/member.dart';
 import '../../../data/repositories/users_repo.dart';
 import '../../../data/repositories/members_repo.dart';
 import '../../routes/app_routes.dart';
+import '../sessions/daily_only_sheet.dart';
 import '../../wallet/member_wallet_sheet.dart';
 import '../sessions/daily_session_view.dart';
 import '../subscriptions/monthly_cycle_sheet.dart';
@@ -52,6 +53,7 @@ class _MembersListViewState extends State<MembersListView> {
     String planLabel(String? p) {
       return switch (p) {
         'hour' => 'بالساعة',
+        'daily' => 'يومي',
         'week' => 'أسبوعي',
         'month' => 'شهري',
         _ => '—',
@@ -65,6 +67,13 @@ class _MembersListViewState extends State<MembersListView> {
             context: context,
             isScrollControlled: true,
             builder: (_) => DailySessionView(member: m),
+          );
+          break;
+        case 'daily':
+          await showModalBottomSheet(
+            context: context,
+            isScrollControlled: true,
+            builder: (_) => DailyOnlySheet(member: m),
           );
           break;
         case 'week':
@@ -88,6 +97,7 @@ class _MembersListViewState extends State<MembersListView> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+
                   ListTile(
                     leading: const Icon(Icons.timer_outlined),
                     title: const Text('بدء جلسة بالساعة'),
@@ -97,6 +107,18 @@ class _MembersListViewState extends State<MembersListView> {
                         context: context,
                         isScrollControlled: true,
                         builder: (_) => DailySessionView(member: m),
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.calendar_today_rounded),
+                    title: const Text('بدء اشتراك يومي'),
+                    onTap: () async {
+                      Navigator.pop(context);
+                      await showModalBottomSheet(
+                        context: context,
+                        isScrollControlled: true,
+                        builder: (_) => DailyOnlySheet(member: m),
                       );
                     },
                   ),

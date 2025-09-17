@@ -20,6 +20,8 @@ class Session {
   final String? planId;
   final SubscriptionCategory? category;
   final num? bandwidthMbpsSnapshot;
+  final num? dailyPriceSnapshot;
+  final String? dailyChargeRef;
 
   // حقول إثبات الدفع (جديدة)
   final String? paymentProofUrl;
@@ -44,6 +46,8 @@ class Session {
     this.planId,
     this.category,
     this.bandwidthMbpsSnapshot,
+    this.dailyPriceSnapshot,
+    this.dailyChargeRef,
     this.paymentProofUrl,
     this.paymentProofUploadedAt,
     this.paymentProofUploadedBy,
@@ -68,6 +72,8 @@ class Session {
     planId: m['planId'] as String?,
     category: subscriptionCategoryFromRaw(m['category']?.toString()),
     bandwidthMbpsSnapshot: m['bandwidthMbpsSnapshot'] as num?,
+    dailyPriceSnapshot: (m['dailyPriceSnapshot'] ?? m['sessionAmount']) as num?,
+    dailyChargeRef: m['dailyChargeRef'] as String?,
     paymentProofUrl: m['paymentProofUrl'] as String?,
     paymentProofUploadedAt: m['paymentProofUploadedAt'] != null
         ? DateTime.tryParse(m['paymentProofUploadedAt'] as String)
@@ -94,6 +100,9 @@ class Session {
     if (category != null) 'category': category!.rawValue,
     if (bandwidthMbpsSnapshot != null)
       'bandwidthMbpsSnapshot': bandwidthMbpsSnapshot,
+    if (dailyPriceSnapshot != null)
+      'dailyPriceSnapshot': dailyPriceSnapshot,
+    if (dailyChargeRef != null) 'dailyChargeRef': dailyChargeRef,
 
     // حقول إثبات الدفع (اختيارية)
     if (paymentProofUrl != null) 'paymentProofUrl': paymentProofUrl,

@@ -45,6 +45,22 @@ extension SessionsDateRanges on DateTime {
   }
 }
 
+/// محولات آمنة للـ int/num
+int? asInt(dynamic v) {
+  if (v == null) return null;
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v.trim());
+  return int.tryParse('$v');
+}
+
+num? asNum(dynamic v) {
+  if (v == null) return null;
+  if (v is num) return v;
+  if (v is String) return num.tryParse(v.trim());
+  return num.tryParse('$v');
+}
+
 /// ملخص سريع للفترة
 class SessionsSummary {
   final int count;
@@ -72,6 +88,7 @@ class SessionCloseResult {
   final num discount;
   final num grandTotal;
   final String paymentMethod; // cash|card|other|app|unpaid
+  final SubscriptionCategory? category;
   final BalanceChargeResult? balanceCharge; // لو استخدم رصيد
 
   const SessionCloseResult({
@@ -83,7 +100,14 @@ class SessionCloseResult {
     required this.grandTotal,
     required this.paymentMethod,
     this.balanceCharge,
+    this.category,
   });
+}
+
+class _DailyPlanSetting {
+  final int bandwidth;
+  final num price;
+  const _DailyPlanSetting({required this.bandwidth, required this.price});
 }
 
 /* ============================ Repository class ============================ */
@@ -102,6 +126,47 @@ class SessionsRepo {
     final rem = mins % 5;
     return rem == 0 ? mins : mins + (5 - rem);
   }
+
+  List<_DailyPlanSetting> _parseDailyPlans(Map<String, dynamic>? data) {
+    final List<_DailyPlanSetting> plans = [];
+    if (data == null) return plans;
+    final prices = data['prices'];
+    if (prices is Map<String, dynamic>) {
+      final rawList = prices['daily_plans'];
+      if (rawList is List) {
+        for (final entry in rawList) {
+          if (entry is Map) {
+            final map = Map<String, dynamic>.from(entry as Map);
+            if (map['active'] == false) continue;
+            final bw = asInt(map['bandwidth']);
+            final price = asNum(map['price']);
+            if (bw != null && price != null) {
+              plans.add(_DailyPlanSetting(bandwidth: bw, price: price));
+            }
+          }
+        }
+        if (plans.isNotEmpty) {
+          plans.sort((a, b) => a.bandwidth.compareTo(b.bandwidth));
+          return plans;
+        }
+      }
+
+      final legacy = prices['daily'];
+      if (legacy is Map) {
+        final map = Map<String, dynamic>.from(legacy as Map);
+        map.forEach((key, value) {
+          final bw = asInt(key);
+          final price = asNum(value);
+          if (bw != null && price != null) {
+            plans.add(_DailyPlanSetting(bandwidth: bw, price: price));
+          }
+        });
+      }
+    }
+    plans.sort((a, b) => a.bandwidth.compareTo(b.bandwidth));
+    return plans;
+  }
+
 
   Future<String> startSession(
       String memberId, {
@@ -145,6 +210,128 @@ class SessionsRepo {
     });
     return doc.id;
   }
+  Future<String> startDailySession({
+    required String memberId,
+    required String memberName,
+    required int bandwidthMbps,
+    String paymentMethod = 'cash',
+    DateTime? checkInAt,
+  }) async {
+    final uid = auth.currentUser?.uid ?? 'system';
+    final settingsSnap = await fs.getDoc('settings/app');
+    final plans = _parseDailyPlans(settingsSnap.data());
+    if (plans.isEmpty) {
+      throw Exception('لا توجد خطط يومية مفعلة');
+    }
+
+    final plan = plans.firstWhere(
+          (p) => p.bandwidth == bandwidthMbps,
+      orElse: () => throw Exception('الخطة اليومية المحددة غير متاحة'),
+    );
+
+    final when = checkInAt ?? DateTime.now();
+    final doc = _col.doc();
+
+    await doc.set({
+      'memberId': memberId,
+      if (memberName.isNotEmpty) 'memberName': memberName,
+      'checkInAt': when.toIso8601String(),
+      'minutes': 0,
+      'hourlyRateAtTime': plan.price,
+      'pricePerHourSnapshot': plan.price,
+      'category': SubscriptionCategory.daily.rawValue,
+      'bandwidthMbpsSnapshot': bandwidthMbps,
+      'drinksTotal': 0,
+      'discount': 0,
+      'paymentMethod': paymentMethod,
+      'sessionAmount': plan.price,
+      'grandTotal': plan.price,
+      'status': 'open',
+      'createdBy': uid,
+      'dailyPriceSnapshot': plan.price,
+    });
+
+    BalanceChargeResult? charge;
+    if (plan.price > 0) {
+      charge = await balance.chargeAmountAllowNegative(
+        memberId: memberId,
+        cost: plan.price,
+        reason: 'Daily session fee',
+        refType: 'session',
+        refId: doc.id,
+      );
+    }
+
+    if (charge != null) {
+      await doc.update({
+        'dailyChargeRef':
+        charge.debtId != null ? 'debt:${charge.debtId}' : 'balance',
+      });
+    }
+
+    return doc.id;
+  }
+  Future<void> finishDailySession({
+    required String sessionId,
+    required String paymentMethod,
+    required num discount,
+  }) async {
+    final snap = await fs.getDoc('sessions/$sessionId');
+    final data = snap.data();
+    if (data == null) {
+      throw Exception('لم يتم العثور على الجلسة');
+    }
+
+    final checkInRaw = data['checkInAt']?.toString();
+    final checkInAt = checkInRaw != null ? DateTime.tryParse(checkInRaw) : null;
+    final checkOutAt = DateTime.now();
+    final minutes = checkInAt != null
+        ? checkOutAt.difference(checkInAt).inMinutes
+        : 0;
+
+    final base =
+    (data['dailyPriceSnapshot'] ?? data['sessionAmount'] ?? 0) as num;
+    final drinks = (data['drinksTotal'] ?? 0) as num;
+    final appliedDiscount = discount < 0 ? 0 : discount;
+
+    num grand = base + drinks - appliedDiscount;
+    if (grand < 0) grand = 0;
+    final delta = grand - base;
+
+    final memberId = (data['memberId'] as String?) ?? '';
+    if (delta > 0 && memberId.isNotEmpty) {
+      await balance.chargeAmountAllowNegative(
+        memberId: memberId,
+        cost: delta,
+        reason: '[daily drinks]',
+        refType: 'session',
+        refId: sessionId,
+      );
+    }
+
+    await fs.update('sessions/$sessionId', {
+      'checkOutAt': checkOutAt.toIso8601String(),
+      'minutes': minutes,
+      'paymentMethod': paymentMethod,
+      'discount': appliedDiscount,
+      'sessionAmount': base,
+      'grandTotal': grand,
+      'status': 'closed',
+    });
+
+    if (paymentMethod != 'unpaid') {
+      try {
+        await debts.settleByRef(
+          refType: 'session',
+          refId: sessionId,
+          method: paymentMethod,
+        );
+      } catch (_) {
+        // نتجاهل أي أخطاء بالتسوية
+      }
+    }
+  }
+
 
   Future<void> stopSession(
       String sessionId, {
@@ -177,6 +364,8 @@ class SessionsRepo {
 
     return url;
   }
+
+
 
   /// حذف إثبات الدفع (اختياري)
   Future<void> clearPaymentProof(String sessionId) async {
@@ -217,6 +406,43 @@ class SessionsRepo {
       );
     }
 
+    final category =
+    subscriptionCategoryFromRaw(data['category']?.toString());
+    final discountValue = manualDiscount > 0
+        ? manualDiscount
+        : (data['discount'] ?? 0) as num;
+
+    if (category == SubscriptionCategory.daily) {
+      final checkIn =
+      DateTime.tryParse(data['checkInAt']?.toString() ?? '');
+      final checkOut = DateTime.now();
+      final minutes = checkIn != null
+          ? checkOut.difference(checkIn).inMinutes
+          : 0;
+      final base =
+      (data['dailyPriceSnapshot'] ?? data['sessionAmount'] ?? 0) as num;
+      final drinks = (data['drinksTotal'] ?? 0) as num;
+      num grand = base + drinks - discountValue;
+      if (grand < 0) grand = 0;
+
+      await finishDailySession(
+        sessionId: sessionId,
+        paymentMethod: paymentMethod,
+        discount: discountValue,
+      );
+
+      return SessionCloseResult(
+        minutes: minutes,
+        rate: base,
+        sessionAmount: base,
+        drinks: drinks,
+        discount: discountValue,
+        grandTotal: grand,
+        paymentMethod: paymentMethod,
+        category: category,
+      );
+    }
+
     final checkIn = DateTime.parse(data['checkInAt']);
     final checkOut = DateTime.now();
 
@@ -227,19 +453,18 @@ class SessionsRepo {
     (data['pricePerHourSnapshot'] ?? data['hourlyRateAtTime'] ?? 0) as num;
 
     final drinks = (data['drinksTotal'] ?? 0) as num;
-    final discount =
-    manualDiscount > 0 ? manualDiscount : (data['discount'] ?? 0) as num;
+
 
     // فَوترة بالساعة مع التقريب للأعلى: أي جزء ساعة يحتسب ساعة كاملة
     final int roundedHours = minutes <= 0 ? 0 : ((minutes + 59) ~/ 60);
     final sessionAmount = roundedHours * rate;
-    final grandTotal = sessionAmount + drinks - discount;
+    final grandTotal = sessionAmount + drinks - discountValue;
 
     await fs.update('sessions/$sessionId', {
       'checkOutAt': checkOut.toIso8601String(),
       'minutes': minutes,
       'paymentMethod': paymentMethod,
-      'discount': discount,
+      'discount': discountValue,
       'sessionAmount': sessionAmount,
       'grandTotal': grandTotal,
       'status': 'closed',
@@ -316,9 +541,10 @@ class SessionsRepo {
       rate: rate,
       sessionAmount: sessionAmount,
       drinks: drinks,
-      discount: discount,
+      discount: discountValue,
       grandTotal: grandTotal,
       paymentMethod: paymentMethod,
+      category: category,
     );
   }
 

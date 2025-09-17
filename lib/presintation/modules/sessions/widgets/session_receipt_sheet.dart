@@ -4,7 +4,7 @@ import '../../../../data/repositories/sessions_repo.dart';
 import '../../../../data/repositories/orders_repo.dart';
 import '../../../../data/repositories/balance_repo.dart';
 import '../../../../data/models/order.dart';
-
+import '../../../../data/models/subscription_category.dart';
 /// تنسيق العملة (شيكل)
 String sCurrency(num v) => '₪ ${v.toStringAsFixed(2)}';
 
@@ -74,7 +74,10 @@ class SessionReceiptSheet extends StatelessWidget {
                       final sessionAmount = (s['sessionAmount'] ?? 0) as num;
                       final grandTotal = (s['grandTotal'] ?? 0) as num;
                       final pm = (s['paymentMethod'] ?? 'cash').toString();
-
+                      final category = subscriptionCategoryFromRaw(
+                          s['category']?.toString());
+                      final dailyPrice =
+                      (s['dailyPriceSnapshot'] ?? sessionAmount) as num;
                       return _HeaderCard(
                         children: _headerRows(
                           minutes: minutes,
@@ -85,6 +88,8 @@ class SessionReceiptSheet extends StatelessWidget {
                           grandTotal: grandTotal,
                           paymentMethod: pm,
                           balanceDeducted: null,
+                          category: category,
+                          dailyPrice: dailyPrice,
                           debt: null,
                         ),
                       );
@@ -214,6 +219,8 @@ class SessionReceiptSheet extends StatelessWidget {
       grandTotal: r.grandTotal,
       paymentMethod: r.paymentMethod,
       balanceDeducted: deducted,
+      category: r.category,
+      dailyPrice: r.sessionAmount,
       debt: debt,
     );
   }
@@ -227,8 +234,22 @@ class SessionReceiptSheet extends StatelessWidget {
     required num grandTotal,
     required String paymentMethod,
     num? balanceDeducted,
+    SubscriptionCategory? category,
+    num? dailyPrice,
     num? debt,
   }) {
+    if (category == SubscriptionCategory.daily) {
+      final base = dailyPrice ?? sessionAmount;
+      return _dailyRows(
+        base: base,
+        drinks: drinks,
+        discount: discount,
+        grandTotal: grandTotal,
+        paymentMethod: paymentMethod,
+        balanceDeducted: balanceDeducted,
+        debt: debt,
+      );
+    }
     final hours = (minutes / 60);
 
     return [
@@ -262,6 +283,45 @@ class SessionReceiptSheet extends StatelessWidget {
       const SizedBox(height: 8),
     ];
   }
+
+  List<Widget> _dailyRows({
+    required num base,
+    required num drinks,
+    required num discount,
+    required num grandTotal,
+    required String paymentMethod,
+    num? balanceDeducted,
+    num? debt,
+  }) {
+    return [
+      _row('سعر اليوم', sCurrency(base)),
+      _row('المشروبات/الخدمات', sCurrency(drinks)),
+      _row('الخصم', '- ${sCurrency(discount)}'),
+      const Divider(),
+      _row('الإجمالي', sCurrency(grandTotal), isStrong: true),
+      const SizedBox(height: 8),
+      _row('طريقة الدفع', arPaymentMethod(paymentMethod)),
+      if (balanceDeducted != null) ...[
+        _row('من الرصيد', '- ${sCurrency(balanceDeducted)}'),
+        if (debt != null && debt > 0)
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 18),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'الرصيد غير كافٍ — تم إنشاء دين بقيمة ${sCurrency(debt)}',
+                  style: const TextStyle(color: Colors.orange),
+                ),
+              ),
+            ],
+          ),
+      ],
+      const SizedBox(height: 8),
+    ];
+  }
+
 
   Widget _row(String k, String v, {bool isStrong = false}) {
     final style = isStrong
