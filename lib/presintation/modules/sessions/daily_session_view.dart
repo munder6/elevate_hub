@@ -1,4 +1,5 @@
-import 'dart:async';import 'package:elevate_hub/presintation/modules/sessions/widgets/close_daily_sheet.dart';
+import 'dart:async';
+import 'package:elevate_hub/presintation/modules/sessions/widgets/close_daily_sheet.dart';
 import 'package:elevate_hub/presintation/modules/sessions/widgets/session_receipt_sheet.dart';
 import 'package:flutter/material.dart';
 
@@ -53,30 +54,19 @@ class _DailySessionViewState extends State<DailySessionView> {
   }
 
   Future<Plan?> _pickSessionPlan(BuildContext context) async {
-    final hoursPlans =
-    await plansRepo.fetchActiveByCategory(SubscriptionCategory.hours);
-    final dailyPlans =
+    // ⬇️ جلب خطط اليومي فقط
+    final plans =
     await plansRepo.fetchActiveByCategory(SubscriptionCategory.daily);
-    final plans = [...hoursPlans, ...dailyPlans];
     if (plans.isEmpty) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('لا توجد خطط مفعّلة للساعة/اليوم')),
+          const SnackBar(content: Text('لا توجد خطط يومية مفعّلة')),
         );
       }
       return null;
     }
 
-    plans.sort((a, b) => a.category.index.compareTo(b.category.index));
-    final preferredCategory = switch (widget.member.preferredPlan) {
-      'daily' => SubscriptionCategory.daily,
-      'hour' => SubscriptionCategory.hours,
-      _ => SubscriptionCategory.hours,
-    };
-    final defaultPlan = plans.firstWhere(
-          (p) => p.category == preferredCategory,
-      orElse: () => plans.first,
-    );
+    final defaultPlan = plans.first;
 
     final selectedId = await showModalBottomSheet<String>(
       context: context,
@@ -114,7 +104,7 @@ class _DailySessionViewState extends State<DailySessionView> {
                           setModalState(() => current = v ?? current),
                       title: Text(plan.title),
                       subtitle: Text(
-                        '${plan.category.label} • ₪ ${plan.price.toStringAsFixed(2)} • ${plan.bandwidthMbps} Mbps',
+                        '₪ ${plan.price.toStringAsFixed(2)} • ${plan.bandwidthMbps} Mbps',
                         textDirection: TextDirection.ltr,
                       ),
                     ),
@@ -150,16 +140,14 @@ class _DailySessionViewState extends State<DailySessionView> {
   String _planSummary(Session? session) {
     if (session == null) return '—';
     final parts = <String>[];
-    final category = session.category;
+    final category = session.categoryEnum; // ⬅️ استخدم enum المحسوب
     if (category != null) {
       parts.add(category.label);
     }
 
     final bandwidth = session.bandwidthMbpsSnapshot;
     if (bandwidth != null) {
-      final formattedBandwidth =
-      bandwidth % 1 == 0 ? bandwidth.toInt().toString() : bandwidth.toString();
-      parts.add('$formattedBandwidth Mbps');
+      parts.add('${bandwidth.toString()} Mbps');
     }
 
     final price = session.pricePerHourSnapshot;
@@ -339,10 +327,12 @@ class _DailySessionViewState extends State<DailySessionView> {
                     final plan = await _pickSessionPlan(context);
                     if (plan == null) return;
 
-                    final id = await sessionsRepo.startSession(
-                      widget.member.id,
-                      planId: plan.id,
+                    // ⬇️ بدء يومي بخطة محددة + طريقة دفع افتراضيًا كاش
+                    final id = await sessionsRepo.startDailyWithPlan(
+                      memberId: widget.member.id,
                       memberName: widget.member.name,
+                      planId: plan.id,
+                      paymentMethod: 'cash',
                       checkInAt: checkInAt,
                     );
 
@@ -434,8 +424,6 @@ class _DailySessionViewState extends State<DailySessionView> {
                           paymentMethod: res.paymentMethod,
                           manualDiscount: res.discount,
                         );
-
-
 
                         if (!mounted) return;
 

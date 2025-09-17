@@ -1,3 +1,4 @@
+// lib/presintation/modules/sessions/widgets/session_receipt_sheet.dart
 import 'package:flutter/material.dart';
 import '../../../../data/services/firestore_service.dart';
 import '../../../../data/repositories/sessions_repo.dart';
@@ -5,6 +6,7 @@ import '../../../../data/repositories/orders_repo.dart';
 import '../../../../data/repositories/balance_repo.dart';
 import '../../../../data/models/order.dart';
 import '../../../../data/models/subscription_category.dart';
+
 /// تنسيق العملة (شيكل)
 String sCurrency(num v) => '₪ ${v.toStringAsFixed(2)}';
 
@@ -17,6 +19,10 @@ String arPaymentMethod(String pm) {
       return 'تطبيق';
     case 'unpaid':
       return 'تسجيل دين';
+    case 'card':
+      return 'بطاقة';
+    case 'other':
+      return 'أخرى';
     default:
       return '—';
   }
@@ -74,10 +80,11 @@ class SessionReceiptSheet extends StatelessWidget {
                       final sessionAmount = (s['sessionAmount'] ?? 0) as num;
                       final grandTotal = (s['grandTotal'] ?? 0) as num;
                       final pm = (s['paymentMethod'] ?? 'cash').toString();
-                      final category = subscriptionCategoryFromRaw(
-                          s['category']?.toString());
+                      final category =
+                      subscriptionCategoryFromRaw(s['category']?.toString());
                       final dailyPrice =
                       (s['dailyPriceSnapshot'] ?? sessionAmount) as num;
+                      final proof = s['paymentProofUrl'] as String?;
                       return _HeaderCard(
                         children: _headerRows(
                           minutes: minutes,
@@ -91,6 +98,7 @@ class SessionReceiptSheet extends StatelessWidget {
                           category: category,
                           dailyPrice: dailyPrice,
                           debt: null,
+                          paymentProofUrl: proof,
                         ),
                       );
                     },
@@ -128,13 +136,15 @@ class SessionReceiptSheet extends StatelessWidget {
                             ...orders.map(
                                   (o) => ListTile(
                                 dense: true,
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                                contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 8),
                                 leading: CircleAvatar(
                                   radius: 16,
                                   backgroundColor:
                                   theme.colorScheme.primary.withOpacity(.12),
                                   child: Icon(Icons.local_cafe_rounded,
-                                      size: 18, color: theme.colorScheme.primary),
+                                      size: 18,
+                                      color: theme.colorScheme.primary),
                                 ),
                                 title: Text(
                                   '${o.itemName} × ${o.qty}',
@@ -156,8 +166,10 @@ class SessionReceiptSheet extends StatelessWidget {
                                     if ((o.memberName ?? '').isNotEmpty)
                                       Text(
                                         'العضو: ${o.memberName}',
-                                        style: theme.textTheme.bodySmall
-                                            ?.copyWith(color: theme.colorScheme.onSurface.withOpacity(.75)),
+                                        style: theme.textTheme.bodySmall?.copyWith(
+                                          color: theme.colorScheme.onSurface
+                                              .withOpacity(.75),
+                                        ),
                                       ),
                                   ],
                                 ),
@@ -222,6 +234,7 @@ class SessionReceiptSheet extends StatelessWidget {
       category: r.category,
       dailyPrice: r.sessionAmount,
       debt: debt,
+      paymentProofUrl: r.paymentProofUrl,
     );
   }
 
@@ -237,6 +250,7 @@ class SessionReceiptSheet extends StatelessWidget {
     SubscriptionCategory? category,
     num? dailyPrice,
     num? debt,
+    String? paymentProofUrl,
   }) {
     if (category == SubscriptionCategory.daily) {
       final base = dailyPrice ?? sessionAmount;
@@ -248,12 +262,14 @@ class SessionReceiptSheet extends StatelessWidget {
         paymentMethod: paymentMethod,
         balanceDeducted: balanceDeducted,
         debt: debt,
+        proofUrl: paymentProofUrl,
       );
     }
     final hours = (minutes / 60);
 
     return [
-      _row('الوقت', '${minutes.toStringAsFixed(0)} دقيقة  (${hours.toStringAsFixed(2)} س)'),
+      _row('الوقت',
+          '${minutes.toStringAsFixed(0)} دقيقة  (${hours.toStringAsFixed(2)} س)'),
       _row('الأجر/ساعة', sCurrency(rate)),
       _row('قيمة الجلسة', sCurrency(sessionAmount)),
       _row('مشروبات', sCurrency(drinks)),
@@ -269,7 +285,8 @@ class SessionReceiptSheet extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 18),
+              const Icon(Icons.warning_amber_rounded,
+                  color: Colors.orange, size: 18),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
@@ -292,6 +309,7 @@ class SessionReceiptSheet extends StatelessWidget {
     required String paymentMethod,
     num? balanceDeducted,
     num? debt,
+    String? proofUrl,
   }) {
     return [
       _row('سعر اليوم', sCurrency(base)),
@@ -301,13 +319,16 @@ class SessionReceiptSheet extends StatelessWidget {
       _row('الإجمالي', sCurrency(grandTotal), isStrong: true),
       const SizedBox(height: 8),
       _row('طريقة الدفع', arPaymentMethod(paymentMethod)),
+      if (paymentMethod == 'app' && proofUrl != null && proofUrl.isNotEmpty)
+        _row('إثبات الدفع', proofUrl),
       if (balanceDeducted != null) ...[
         _row('من الرصيد', '- ${sCurrency(balanceDeducted)}'),
         if (debt != null && debt > 0)
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 18),
+              const Icon(Icons.warning_amber_rounded,
+                  color: Colors.orange, size: 18),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
@@ -322,14 +343,12 @@ class SessionReceiptSheet extends StatelessWidget {
     ];
   }
 
-
   Widget _row(String k, String v, {bool isStrong = false}) {
-    final style = isStrong
-        ? const TextStyle(fontWeight: FontWeight.w700)
-        : const TextStyle();
+    final style =
+    isStrong ? const TextStyle(fontWeight: FontWeight.w700) : const TextStyle();
 
-    // إجبار الأرقام/العملة على LTR عند الحاجة
-    final isNumeric = RegExp(r'[0-9]').hasMatch(v);
+    // إجبار الأرقام/العملة/الروابط على LTR عند الحاجة
+    final isNumeric = RegExp(r'[0-9A-Za-z]').hasMatch(v);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(

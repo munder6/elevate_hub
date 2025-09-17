@@ -90,6 +90,7 @@ class SessionCloseResult {
   final String paymentMethod; // cash|card|other|app|unpaid
   final SubscriptionCategory? category;
   final BalanceChargeResult? balanceCharge; // لو استخدم رصيد
+  final String? paymentProofUrl;
 
   const SessionCloseResult({
     required this.minutes,
@@ -101,14 +102,11 @@ class SessionCloseResult {
     required this.paymentMethod,
     this.balanceCharge,
     this.category,
+    this.paymentProofUrl,
   });
 }
 
-class _DailyPlanSetting {
-  final int bandwidth;
-  final num price;
-  const _DailyPlanSetting({required this.bandwidth, required this.price});
-}
+
 
 /* ============================ Repository class ============================ */
 
@@ -127,45 +125,7 @@ class SessionsRepo {
     return rem == 0 ? mins : mins + (5 - rem);
   }
 
-  List<_DailyPlanSetting> _parseDailyPlans(Map<String, dynamic>? data) {
-    final List<_DailyPlanSetting> plans = [];
-    if (data == null) return plans;
-    final prices = data['prices'];
-    if (prices is Map<String, dynamic>) {
-      final rawList = prices['daily_plans'];
-      if (rawList is List) {
-        for (final entry in rawList) {
-          if (entry is Map) {
-            final map = Map<String, dynamic>.from(entry as Map);
-            if (map['active'] == false) continue;
-            final bw = asInt(map['bandwidth']);
-            final price = asNum(map['price']);
-            if (bw != null && price != null) {
-              plans.add(_DailyPlanSetting(bandwidth: bw, price: price));
-            }
-          }
-        }
-        if (plans.isNotEmpty) {
-          plans.sort((a, b) => a.bandwidth.compareTo(b.bandwidth));
-          return plans;
-        }
-      }
 
-      final legacy = prices['daily'];
-      if (legacy is Map) {
-        final map = Map<String, dynamic>.from(legacy as Map);
-        map.forEach((key, value) {
-          final bw = asInt(key);
-          final price = asNum(value);
-          if (bw != null && price != null) {
-            plans.add(_DailyPlanSetting(bandwidth: bw, price: price));
-          }
-        });
-      }
-    }
-    plans.sort((a, b) => a.bandwidth.compareTo(b.bandwidth));
-    return plans;
-  }
 
 
   Future<String> startSession(
@@ -210,37 +170,98 @@ class SessionsRepo {
     });
     return doc.id;
   }
-  Future<String> startDailySession({
+  Future<String> startDailyWithPlan({
     required String memberId,
     required String memberName,
-    required int bandwidthMbps,
-    String paymentMethod = 'cash',
+    required String planId,
+    required String paymentMethod,
+    String? proofUrl,
     DateTime? checkInAt,
   }) async {
     final uid = auth.currentUser?.uid ?? 'system';
-    final settingsSnap = await fs.getDoc('settings/app');
-    final plans = _parseDailyPlans(settingsSnap.data());
-    if (plans.isEmpty) {
-      throw Exception('لا توجد خطط يومية مفعلة');
+    final plan = await plans.getPlanOnce(planId);
+    if (plan == null) {
+      throw Exception('الخطة غير موجودة');
+    }
+    if (plan.category != SubscriptionCategory.daily) {
+      throw Exception('الخطة ليست يومية');
+    }
+    if (!plan.active) {
+      throw Exception('الخطة غير مفعلة');
     }
 
-    final plan = plans.firstWhere(
-          (p) => p.bandwidth == bandwidthMbps,
-      orElse: () => throw Exception('الخطة اليومية المحددة غير متاحة'),
-    );
+    final trimmedProof = proofUrl?.trim();
+    if (paymentMethod == 'app' && (trimmedProof == null || trimmedProof.isEmpty)) {
+      throw Exception('الدفع عبر التطبيق يتطلّب إرفاق إثبات دفع');
+    }
+
+    final doc = _col.doc();
 
     final when = checkInAt ?? DateTime.now();
-    final doc = _col.doc();
+
+    String? chargeRef;
+    if (plan.price > 0) {
+      if (paymentMethod == 'cash') {
+        final charge = await balance.chargeAmountAllowNegative(
+          memberId: memberId,
+          cost: plan.price,
+          reason: 'Daily session fee',
+          refType: 'session',
+          refId: doc.id,
+        );
+        chargeRef = charge.debtId != null
+            ? 'balance:${charge.debtId}'
+            : 'balance';
+      } else if (paymentMethod == 'unpaid') {
+        final nowIso = DateTime.now().toIso8601String();
+        final debtDocId = 'session_${doc.id}';
+        final debtRef = fs.doc('debts/$debtDocId');
+        await FirebaseFirestore.instance.runTransaction((tx) async {
+          final snap = await tx.get(debtRef);
+          final existing = snap.data();
+          final createdAt = existing?['createdAt']?.toString() ?? nowIso;
+          final List<Map<String, dynamic>> payments =
+          ((existing?['payments'] as List?) ?? [])
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+
+          tx.set(
+            debtRef,
+            {
+              'memberId': memberId,
+              if (memberName.isNotEmpty) 'memberName': memberName,
+              'amount': plan.price,
+              'reason': 'جلسة يومية غير مدفوعة',
+              'status': 'open',
+              'createdAt': createdAt,
+              'refType': 'session',
+              'refId': doc.id,
+              'sessionId': doc.id,
+              'payments': payments,
+            },
+            SetOptions(merge: true),
+          );
+        });
+        chargeRef = 'debt:$debtDocId';
+      } else if (paymentMethod == 'app') {
+        chargeRef = 'app';
+      } else {
+        chargeRef = paymentMethod;
+      }
+    } else {
+      chargeRef = paymentMethod;
+    }
 
     await doc.set({
       'memberId': memberId,
       if (memberName.isNotEmpty) 'memberName': memberName,
       'checkInAt': when.toIso8601String(),
       'minutes': 0,
+      'planId': plan.id,
       'hourlyRateAtTime': plan.price,
       'pricePerHourSnapshot': plan.price,
       'category': SubscriptionCategory.daily.rawValue,
-      'bandwidthMbpsSnapshot': bandwidthMbps,
+      'bandwidthMbpsSnapshot': plan.bandwidthMbps,
       'drinksTotal': 0,
       'discount': 0,
       'paymentMethod': paymentMethod,
@@ -249,25 +270,12 @@ class SessionsRepo {
       'status': 'open',
       'createdBy': uid,
       'dailyPriceSnapshot': plan.price,
+      if (chargeRef != null) 'dailyChargeRef': chargeRef,
+      if (paymentMethod == 'app' && trimmedProof != null)
+        'paymentProofUrl': trimmedProof,
     });
 
-    BalanceChargeResult? charge;
-    if (plan.price > 0) {
-      charge = await balance.chargeAmountAllowNegative(
-        memberId: memberId,
-        cost: plan.price,
-        reason: 'Daily session fee',
-        refType: 'session',
-        refId: doc.id,
-      );
-    }
 
-    if (charge != null) {
-      await doc.update({
-        'dailyChargeRef':
-        charge.debtId != null ? 'debt:${charge.debtId}' : 'balance',
-      });
-    }
 
     return doc.id;
   }
@@ -275,6 +283,7 @@ class SessionsRepo {
     required String sessionId,
     required String paymentMethod,
     required num discount,
+    String? proofUrl,
   }) async {
     final snap = await fs.getDoc('sessions/$sessionId');
     final data = snap.data();
@@ -296,28 +305,100 @@ class SessionsRepo {
 
     num grand = base + drinks - appliedDiscount;
     if (grand < 0) grand = 0;
-    final delta = grand - base;
+    num delta = grand - base;
+    if (delta < 0) delta = 0;
 
     final memberId = (data['memberId'] as String?) ?? '';
-    if (delta > 0 && memberId.isNotEmpty) {
-      await balance.chargeAmountAllowNegative(
-        memberId: memberId,
-        cost: delta,
-        reason: '[daily drinks]',
-        refType: 'session',
-        refId: sessionId,
-      );
+    final memberName = (data['memberName'] as String?) ?? '';
+    final existingProof = (data['paymentProofUrl'] as String?)?.trim();
+
+    String? proofToPersist;
+    if (paymentMethod == 'app') {
+      final trimmed = proofUrl?.trim();
+      proofToPersist = (trimmed != null && trimmed.isNotEmpty)
+          ? trimmed
+          : (existingProof != null && existingProof.isNotEmpty
+          ? existingProof
+          : null);
+      if (proofToPersist == null) {
+        throw Exception('الدفع عبر التطبيق يتطلّب إرفاق إثبات دفع');
+      }
     }
 
-    await fs.update('sessions/$sessionId', {
+    String? chargeRef = data['dailyChargeRef']?.toString();
+
+    if (delta > 0 && memberId.isNotEmpty) {
+      if (paymentMethod == 'cash') {
+        final charge = await balance.chargeAmountAllowNegative(
+          memberId: memberId,
+          cost: delta,
+          reason: '[daily extras]',
+          refType: 'session',
+          refId: sessionId,
+        );
+        chargeRef = charge.debtId != null
+            ? 'balance:${charge.debtId}'
+            : 'balance';
+      } else if (paymentMethod == 'unpaid') {
+        final nowIso = DateTime.now().toIso8601String();
+        final debtDocId = 'session_$sessionId';
+        final debtRef = fs.doc('debts/$debtDocId');
+        await FirebaseFirestore.instance.runTransaction((tx) async {
+          final snap = await tx.get(debtRef);
+          final existing = snap.data();
+          final createdAt = existing?['createdAt']?.toString() ?? nowIso;
+          final List<Map<String, dynamic>> payments =
+          ((existing?['payments'] as List?) ?? [])
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+          final currentAmount = (existing?['amount'] ?? 0) as num;
+
+          tx.set(
+            debtRef,
+            {
+              'memberId': memberId,
+              if (memberName.isNotEmpty) 'memberName': memberName,
+              'amount': currentAmount + delta,
+              'reason': 'جلسة يومية غير مدفوعة',
+              'status': 'open',
+              'createdAt': createdAt,
+              'refType': 'session',
+              'refId': sessionId,
+              'sessionId': sessionId,
+              'payments': payments,
+            },
+            SetOptions(merge: true),
+          );
+        });
+        chargeRef = 'debt:$debtDocId';
+      } else if (paymentMethod == 'app') {
+        chargeRef = 'app';
+      } else {
+        chargeRef = paymentMethod;
+      }
+    }
+
+    final update = <String, dynamic>{
       'checkOutAt': checkOutAt.toIso8601String(),
       'minutes': minutes,
       'paymentMethod': paymentMethod,
       'discount': appliedDiscount,
-      'sessionAmount': base,
+      'drinksTotal': drinks,
       'grandTotal': grand,
       'status': 'closed',
-    });
+      'sessionAmount': base,
+      if (chargeRef != null) 'dailyChargeRef': chargeRef,
+    };
+
+    if (paymentMethod == 'app') {
+      update['paymentProofUrl'] = proofToPersist;
+    } else if (existingProof != null && existingProof.isNotEmpty) {
+      update['paymentProofUrl'] = FieldValue.delete();
+      update['paymentProofUploadedAt'] = FieldValue.delete();
+      update['paymentProofUploadedBy'] = FieldValue.delete();
+    }
+
+    await fs.update('sessions/$sessionId', update);
 
     if (paymentMethod != 'unpaid') {
       try {
@@ -327,7 +408,7 @@ class SessionsRepo {
           method: paymentMethod,
         );
       } catch (_) {
-        // نتجاهل أي أخطاء بالتسوية
+        // تجاهل أخطاء التسوية
       }
     }
   }
@@ -403,6 +484,7 @@ class SessionsRepo {
         discount: 0,
         grandTotal: 0,
         paymentMethod: 'cash',
+        paymentProofUrl: null,
       );
     }
 
@@ -429,6 +511,7 @@ class SessionsRepo {
         sessionId: sessionId,
         paymentMethod: paymentMethod,
         discount: discountValue,
+        proofUrl: null,
       );
 
       return SessionCloseResult(
@@ -440,6 +523,7 @@ class SessionsRepo {
         grandTotal: grand,
         paymentMethod: paymentMethod,
         category: category,
+        paymentProofUrl: data['paymentProofUrl'] as String?,
       );
     }
 
@@ -545,6 +629,7 @@ class SessionsRepo {
       grandTotal: grandTotal,
       paymentMethod: paymentMethod,
       category: category,
+      paymentProofUrl: null,
     );
   }
 

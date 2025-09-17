@@ -9,6 +9,8 @@ class PlansRepo {
   final fs = FirestoreService();
   final auth = AuthService();
 
+  Future<Plan?> getPlanOnce(String id) => getById(id);
+
   CollectionReference<Map<String, dynamic>> get _col => fs.col('plans');
 
   Stream<List<Plan>> watchAll() {

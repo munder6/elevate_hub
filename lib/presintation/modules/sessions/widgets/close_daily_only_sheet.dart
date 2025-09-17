@@ -1,14 +1,40 @@
+// lib/presintation/modules/sessions/widgets/close_daily_only_sheet.dart
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+
+import '../../../../data/repositories/sessions_repo.dart';
+
+class CloseDailyResult {
+  final String paymentMethod;
+  final num discount;
+  final String? proofUrl;
+  const CloseDailyResult({
+    required this.paymentMethod,
+    required this.discount,
+    this.proofUrl,
+  });
+}
 
 class CloseDailyOnlySheet extends StatefulWidget {
+  final String sessionId;
   final num basePrice;
   final num drinksTotal;
   final num initialDiscount;
+  final String initialPaymentMethod;
+  final String? initialProofUrl;
+  final SessionsRepo? sessionsRepo;
+
   const CloseDailyOnlySheet({
     super.key,
+    required this.sessionId,
     required this.basePrice,
     required this.drinksTotal,
     this.initialDiscount = 0,
+    this.initialPaymentMethod = 'cash',
+    this.initialProofUrl,
+    this.sessionsRepo,
   });
 
   @override
@@ -16,24 +42,34 @@ class CloseDailyOnlySheet extends StatefulWidget {
 }
 
 class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
-  String _paymentMethod = 'cash';
-  late final TextEditingController _discountCtrl;
+  final TextEditingController _discountCtrl = TextEditingController();
+  final ImagePicker _picker = ImagePicker();
 
-  static const _methods = <_MethodOption>[
-    _MethodOption('cash', 'كاش'),
-    _MethodOption('app', 'تطبيق'),
-    _MethodOption('unpaid', 'غير مدفوع'),
-    _MethodOption('card', 'بطاقة'),
-    _MethodOption('other', 'أخرى'),
+  late String _paymentMethod;
+  String? _proofUrl;
+  File? _localImage;
+  bool _uploading = false;
+  String? _uploadError;
+
+  static const _methods = <({String value, String label})>[
+    (value: 'cash', label: 'كاش'),
+    (value: 'app', label: 'تطبيق'),
+    (value: 'unpaid', label: 'غير مدفوع'),
+    (value: 'card', label: 'بطاقة'),
+    (value: 'other', label: 'أخرى'),
   ];
+
+  SessionsRepo get _repo => widget.sessionsRepo ?? SessionsRepo();
 
   @override
   void initState() {
     super.initState();
-    final initial = widget.initialDiscount;
-    _discountCtrl = TextEditingController(
-      text: initial > 0 ? initial.toString() : '',
-    );
+    _paymentMethod =
+    widget.initialPaymentMethod.isNotEmpty ? widget.initialPaymentMethod : 'cash';
+    if (widget.initialDiscount > 0) {
+      _discountCtrl.text = widget.initialDiscount.toString();
+    }
+    _proofUrl = widget.initialProofUrl;
   }
 
   @override
@@ -55,11 +91,80 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
     return total < 0 ? 0 : total;
   }
 
-  void _submit() {
-    Navigator.pop(context, {
-      'paymentMethod': _paymentMethod,
-      'discount': _discount,
+  String? get _effectiveProof {
+    final p = _proofUrl?.trim();
+    if (p == null || p.isEmpty) return null;
+    return p;
+  }
+
+  Future<void> _pickImage(ImageSource source) async {
+    setState(() {
+      _uploadError = null;
+      _uploading = true;
     });
+    try {
+      final picked = await _picker.pickImage(source: source, imageQuality: 85);
+      if (picked == null) {
+        if (mounted) setState(() => _uploading = false);
+        return;
+      }
+      final file = File(picked.path);
+      setState(() {
+        _localImage = file;
+      });
+      final url = await _repo.uploadPaymentProof(
+        sessionId: widget.sessionId,
+        file: file,
+      );
+      if (!mounted) return;
+      setState(() {
+        _proofUrl = url;
+        _uploading = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم رفع إثبات الدفع')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+        _uploadError = 'فشل الرفع: $e';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('فشل رفع الإثبات: $e')),
+      );
+    }
+  }
+
+  Future<void> _removeProof() async {
+    if (_proofUrl != null && _proofUrl!.isNotEmpty) {
+      try {
+        await _repo.clearPaymentProof(widget.sessionId);
+      } catch (_) {}
+    }
+    setState(() {
+      _proofUrl = null;
+      _localImage = null;
+      _uploadError = null;
+      _uploading = false;
+    });
+  }
+
+  void _submit() {
+    if (_paymentMethod == 'app' && _effectiveProof == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يجب إرفاق إثبات الدفع للتطبيق')),
+      );
+      return;
+    }
+    Navigator.pop(
+      context,
+      CloseDailyResult(
+        paymentMethod: _paymentMethod,
+        discount: _discount,
+        proofUrl: _effectiveProof,
+      ),
+    );
   }
 
   @override
@@ -92,6 +197,8 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
               const SizedBox(height: 12),
               Text('إغلاق الاشتراك اليومي', style: theme.textTheme.titleMedium),
               const SizedBox(height: 16),
+
+              // طريقة الدفع
               Text('طريقة الدفع', style: theme.textTheme.titleSmall),
               const SizedBox(height: 8),
               Wrap(
@@ -110,7 +217,71 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
                 )
                     .toList(),
               ),
+
+              // إثبات الدفع للتطبيق
+              if (_paymentMethod == 'app') ...[
+                const SizedBox(height: 16),
+                Text('إثبات الدفع', style: theme.textTheme.titleSmall),
+                const SizedBox(height: 8),
+                if (_uploadError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      _uploadError!,
+                      style: TextStyle(color: theme.colorScheme.error),
+                    ),
+                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _uploading ? null : () => _pickImage(ImageSource.gallery),
+                        icon: const Icon(Icons.photo_library_rounded),
+                        label: const Text('المعرض'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _uploading ? null : () => _pickImage(ImageSource.camera),
+                        icon: const Icon(Icons.photo_camera_rounded),
+                        label: const Text('الكاميرا'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                if (_uploading)
+                  const Center(child: CircularProgressIndicator()),
+                if (!_uploading && (_localImage != null || _proofUrl != null))
+                  Stack(
+                    children: [
+                      AspectRatio(
+                        aspectRatio: 4 / 3,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: _localImage != null
+                              ? Image.file(_localImage!, fit: BoxFit.cover)
+                              : Image.network(_proofUrl!, fit: BoxFit.cover),
+                        ),
+                      ),
+                      Positioned(
+                        top: 8,
+                        left: 8,
+                        child: IconButton(
+                          style: IconButton.styleFrom(
+                            backgroundColor: theme.colorScheme.surface.withOpacity(.9),
+                          ),
+                          onPressed: _removeProof,
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+
               const SizedBox(height: 16),
+              // الخصم
               Text('الخصم', style: theme.textTheme.titleSmall),
               const SizedBox(height: 8),
               TextField(
@@ -124,7 +295,9 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
                 ),
                 onChanged: (_) => setState(() {}),
               ),
+
               const SizedBox(height: 16),
+              // الملخص
               Card(
                 elevation: 0,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -134,8 +307,7 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text('ملخص الفاتورة',
-                          style: theme.textTheme.titleSmall
-                              ?.copyWith(fontWeight: FontWeight.w700)),
+                          style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
                       const SizedBox(height: 12),
                       _summaryRow('سعر اليوم', _currency(widget.basePrice)),
                       _summaryRow('المشروبات/الخدمات', _currency(widget.drinksTotal)),
@@ -146,7 +318,9 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
                   ),
                 ),
               ),
+
               const SizedBox(height: 16),
+              // الأزرار
               Row(
                 children: [
                   TextButton(
@@ -177,8 +351,7 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
           Text(
             value,
             textDirection: TextDirection.ltr,
-            style:
-            isStrong ? const TextStyle(fontWeight: FontWeight.w800) : null,
+            style: isStrong ? const TextStyle(fontWeight: FontWeight.w800) : null,
           ),
         ],
       ),
@@ -186,10 +359,4 @@ class _CloseDailyOnlySheetState extends State<CloseDailyOnlySheet> {
   }
 
   String _currency(num value) => '₪${value.toStringAsFixed(2)}';
-}
-
-class _MethodOption {
-  final String value;
-  final String label;
-  const _MethodOption(this.value, this.label);
 }

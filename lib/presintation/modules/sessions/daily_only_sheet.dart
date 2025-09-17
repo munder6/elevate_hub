@@ -1,15 +1,16 @@
 import 'dart:async';
-
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../../../data/models/member.dart';
+import '../../../data/models/plan.dart';
 import '../../../data/models/session.dart';
 import '../../../data/models/subscription_category.dart';
+import '../../../data/repositories/plans_repo.dart';
 import '../../../data/repositories/sessions_repo.dart';
-import '../../../data/services/firestore_service.dart';
 import 'widgets/close_daily_only_sheet.dart';
 import 'widgets/session_receipt_sheet.dart';
+
+
 
 class DailyOnlySheet extends StatefulWidget {
   final Member member;
@@ -21,112 +22,84 @@ class DailyOnlySheet extends StatefulWidget {
 
 class _DailyOnlySheetState extends State<DailyOnlySheet> {
   final sessionsRepo = SessionsRepo();
-  final fs = FirestoreService();
+  final plansRepo = PlansRepo();
 
-  StreamSubscription<List<Session>>? _openSessionsSub;
+  late final Stream<List<Plan>> _plansStream;
+  StreamSubscription<List<Session>>? _openSub;
+
   Session? _openDailySession;
+  String? _selectedPlanId;
+
+  String _paymentMethod = 'cash'; // cash | app | unpaid | card | other
+  final TextEditingController _proofCtrl = TextEditingController();
+
   bool _starting = false;
   bool _finishing = false;
-  int? _selectedBandwidth;
 
   @override
   void initState() {
     super.initState();
-    _openSessionsSub =
-        sessionsRepo.watchMemberOpenSessions(widget.member.id).listen((list) {
-          Session? daily;
-          for (final s in list) {
-            if (s.category == SubscriptionCategory.daily) {
-              daily = s;
-              break;
-            }
-          }
-          if (!mounted) return;
-          setState(() => _openDailySession = daily);
-        });
+    _plansStream =
+        plansRepo.watchByCategory(SubscriptionCategory.daily, onlyActive: true);
+
+    _openSub = sessionsRepo
+        .watchMemberOpenSessions(widget.member.id)
+        .listen((sessions) {
+      final daily = sessions.firstWhereOrNull(
+            (s) => s.categoryEnum == SubscriptionCategory.daily,
+      );
+      if (!mounted) return;
+      setState(() => _openDailySession = daily);
+    });
   }
 
   @override
   void dispose() {
-    _openSessionsSub?.cancel();
+    _openSub?.cancel();
+    _proofCtrl.dispose();
     super.dispose();
   }
 
-  // ===== محولات آمنة تمنع toInt على String =====
-  int? asInt(dynamic v) {
-    if (v == null) return null;
-    if (v is int) return v;
-    if (v is num) return v.toInt();
-    if (v is String) return int.tryParse(v.trim());
-    return int.tryParse('$v');
+  bool get _requiresProof => _paymentMethod == 'app';
+
+  bool get _canStart {
+    if (_selectedPlanId == null) return false;
+    if (!_requiresProof) return true;
+    return _proofCtrl.text.trim().isNotEmpty;
   }
 
-  num? asNum(dynamic v) {
-    if (v == null) return null;
-    if (v is num) return v;
-    if (v is String) return num.tryParse(v.trim());
-    return num.tryParse('$v');
-  }
-
-  List<_DailyPlanOption> _extractPlans(Map<String, dynamic>? data) {
-    final List<_DailyPlanOption> active = [];
-    if (data == null) return active;
-
-    final prices = data['prices'];
-    if (prices is Map<String, dynamic>) {
-      // الشكل الجديد: prices.daily_plans = [ {bandwidth, price, active}, ... ]
-      final rawList = prices['daily_plans'];
-      if (rawList is List) {
-        for (final entry in rawList) {
-          if (entry is Map) {
-            final map = Map<String, dynamic>.from(entry as Map);
-            final isActive = map['active'] != false;
-
-            final bwInt = asInt(map['bandwidth']);
-            final priceNum = asNum(map['price']);
-
-            if (isActive && bwInt != null && priceNum != null) {
-              active.add(_DailyPlanOption(bandwidth: bwInt, price: priceNum));
-            }
-          }
-        }
-        if (active.isNotEmpty) {
-          active.sort((a, b) => a.bandwidth.compareTo(b.bandwidth));
-          return active;
-        }
-      }
-
-      // fallback القديم: prices.daily = { "50": 20, 100: 30, ... }
-      final fallback = prices['daily'];
-      if (fallback is Map) {
-        final map = Map<String, dynamic>.from(fallback as Map);
-        map.forEach((key, value) {
-          final bwInt = asInt(key);
-          final priceNum = asNum(value);
-          if (bwInt != null && priceNum != null) {
-            active.add(_DailyPlanOption(bandwidth: bwInt, price: priceNum));
-          }
-        });
-      }
+  void _ensureSelection(List<Plan> plans) {
+    if (plans.isEmpty) {
+      _selectedPlanId = null;
+      return;
     }
-
-    active.sort((a, b) => a.bandwidth.compareTo(b.bandwidth));
-    return active;
+    if (_selectedPlanId != null && plans.any((p) => p.id == _selectedPlanId)) {
+      return;
+    }
+    _selectedPlanId = plans.first.id;
   }
 
-  Future<void> _startDaily(_DailyPlanOption plan) async {
+  Future<void> _startDaily(Plan plan) async {
+    if (_starting) return;
     setState(() => _starting = true);
     try {
-      await sessionsRepo.startDailySession(
+      final proof = _requiresProof ? _proofCtrl.text.trim() : null;
+      await sessionsRepo.startDailyWithPlan(
         memberId: widget.member.id,
         memberName: widget.member.name,
-        bandwidthMbps: plan.bandwidth,
-        paymentMethod: 'cash',
+        planId: plan.id,
+        paymentMethod: _paymentMethod,
+        proofUrl: (proof?.isEmpty ?? true) ? null : proof,
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تم تسجيل دخول ${widget.member.name} ليوم كامل')),
+        SnackBar(
+          content: Text('تم بدء اليوم واحتساب ₪${plan.price.toStringAsFixed(2)}'),
+        ),
       );
+      if (_requiresProof) {
+        _proofCtrl.clear();
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -138,29 +111,32 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
   }
 
   Future<void> _finishDaily(Session session) async {
+    if (_finishing) return;
+
     final base = session.dailyPriceSnapshot ?? session.sessionAmount;
     final drinks = session.drinksTotal;
-    final result = await showModalBottomSheet<Map<String, dynamic>>(
+
+    final result = await showModalBottomSheet<CloseDailyResult>(
       context: context,
       isScrollControlled: true,
       builder: (_) => CloseDailyOnlySheet(
+        sessionId: session.id,
         basePrice: base,
         drinksTotal: drinks,
         initialDiscount: session.discount,
+        initialPaymentMethod: session.paymentMethodValue,
+        initialProofUrl: session.paymentProofUrl,
       ),
     );
-
     if (result == null) return;
-
-    final paymentMethod = (result['paymentMethod'] as String?) ?? 'cash';
-    final discount = (result['discount'] as num?) ?? 0;
 
     setState(() => _finishing = true);
     try {
       await sessionsRepo.finishDailySession(
         sessionId: session.id,
-        paymentMethod: paymentMethod,
-        discount: discount,
+        paymentMethod: result.paymentMethod,
+        discount: result.discount,
+        proofUrl: result.proofUrl,
       );
 
       if (!mounted) return;
@@ -182,28 +158,87 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
     }
   }
 
-  Widget _infoTile({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-  }) {
+  Widget _paymentChips(ThemeData theme) {
+    const methods = <({String value, String label})>[
+      (value: 'cash', label: 'كاش'),
+      (value: 'app', label: 'تطبيق'),
+      (value: 'unpaid', label: 'تسجيل دين'),
+      (value: 'card', label: 'بطاقة'),
+      (value: 'other', label: 'أخرى'),
+    ];
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: methods
+          .map(
+            (m) => ChoiceChip(
+          label: Text(m.label),
+          selected: _paymentMethod == m.value,
+          onSelected: (selected) {
+            if (!selected) return;
+            setState(() {
+              _paymentMethod = m.value;
+              if (!_requiresProof) _proofCtrl.clear();
+            });
+          },
+        ),
+      )
+          .toList(),
+    );
+  }
+
+  Widget _proofField() {
+    if (!_requiresProof) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 12),
+        TextField(
+          controller: _proofCtrl,
+          textDirection: TextDirection.ltr,
+          decoration: const InputDecoration(
+            labelText: 'إثبات الدفع',
+            hintText: 'رابط أو مرجع التحويل',
+            border: OutlineInputBorder(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _openSessionCard(Session session, ThemeData theme) {
+    final base = session.dailyPriceSnapshot ?? session.sessionAmount;
+    final drinks = session.drinksTotal;
+    final discount = session.discount;
+    final total = (base + drinks - discount).clamp(0, double.infinity);
+
     return Card(
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: ListTile(
-        leading: CircleAvatar(
-          radius: 22,
-          backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(.12),
-          child: Icon(icon, color: Theme.of(context).colorScheme.primary),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('ملخص الاشتراك المفتوح',
+                style: theme.textTheme.titleSmall
+                    ?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            _summaryRow('سعر اليوم', _currency(base)),
+            _summaryRow('المشروبات/الخدمات', _currency(drinks)),
+            _summaryRow('الخصم', '- ${_currency(discount)}'),
+            const Divider(),
+            _summaryRow('الإجمالي الحالي', _currency(total), isStrong: true),
+          ],
         ),
-        title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
-        subtitle: Text(subtitle),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Directionality(
       textDirection: TextDirection.rtl,
       child: SafeArea(
@@ -214,57 +249,19 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
             top: 16,
             bottom: MediaQuery.of(context).viewInsets.bottom + 16,
           ),
-          child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-            stream: fs.watchDoc('settings/app'),
-            builder: (context, snap) {
-              if (snap.connectionState == ConnectionState.waiting &&
-                  !snap.hasData) {
+          child: StreamBuilder<List<Plan>>(
+            stream: _plansStream,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting &&
+                  !snapshot.hasData) {
                 return const Center(child: CircularProgressIndicator());
               }
-
-              final data = snap.data?.data();
-              final plans = _extractPlans(data);
-
-              // ضبط الاختيار الأولي للخطة
-              if (_selectedBandwidth == null && plans.isNotEmpty) {
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (mounted) {
-                    setState(() => _selectedBandwidth = plans.first.bandwidth);
-                  }
-                });
-              } else if (plans.isNotEmpty &&
-                  plans.every((p) => p.bandwidth != _selectedBandwidth)) {
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (mounted) {
-                    setState(() => _selectedBandwidth = plans.first.bandwidth);
-                  }
-                });
-              }
-
+              final plans = snapshot.data ?? const <Plan>[];
+              _ensureSelection(plans);
               final selectedPlan =
-              plans.firstWhereOrNull((p) => p.bandwidth == _selectedBandwidth);
+              plans.firstWhereOrNull((p) => p.id == _selectedPlanId);
 
-              final openSession = _openDailySession;
-              final theme = Theme.of(context);
-
-              // حسابات خاصة بوجود جلسة مفتوحة (بدون تعريف متغيرات داخل children)
-              num? baseValue;
-              num? computedGrand;
-              int? bandwidth;
-              if (openSession != null) {
-                baseValue =
-                    openSession.dailyPriceSnapshot ?? openSession.sessionAmount;
-                computedGrand =
-                    baseValue + openSession.drinksTotal - openSession.discount;
-
-                if (openSession != null) {
-                  baseValue =
-                      openSession.dailyPriceSnapshot ?? openSession.sessionAmount;
-                  computedGrand =
-                      baseValue + openSession.drinksTotal - openSession.discount;
-                  bandwidth = openSession.bandwidthMbpsSnapshot?.toInt();
-                }
-              }
+              final hasOpen = _openDailySession != null;
 
               return Column(
                 mainAxisSize: MainAxisSize.min,
@@ -281,29 +278,34 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Text('إدارة الاشتراك اليومي', style: theme.textTheme.titleMedium),
+                  Text('إدارة الاشتراك اليومي',
+                      style: theme.textTheme.titleMedium),
                   const SizedBox(height: 16),
 
                   // لا توجد جلسة مفتوحة
-                  if (openSession == null) ...[
+                  if (!hasOpen) ...[
                     if (plans.isEmpty)
                       Card(
                         color: theme.colorScheme.errorContainer,
                         shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                         child: Padding(
                           padding: const EdgeInsets.all(16),
                           child: Row(
                             children: [
-                              Icon(Icons.info_rounded,
-                                  color: theme.colorScheme.onErrorContainer),
+                              Icon(
+                                Icons.info_rounded,
+                                color: theme.colorScheme.onErrorContainer,
+                              ),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
-                                  'لا توجد خطط يومية مفعلة في الإعدادات.',
+                                  'لا توجد خطط يومية مفعّلة',
                                   style: TextStyle(
-                                      color: theme.colorScheme.onErrorContainer,
-                                      fontWeight: FontWeight.w600),
+                                    color: theme.colorScheme.onErrorContainer,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
                             ],
@@ -311,45 +313,33 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
                         ),
                       )
                     else ...[
-                      Text('اختر الخطة اليومية', style: theme.textTheme.titleSmall),
+                      Text('اختر الخطة اليومية',
+                          style: theme.textTheme.titleSmall),
                       const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: plans
-                            .map(
-                              (plan) => ChoiceChip(
-                            label: Text(
-                              '${plan.bandwidth} Mbps • ₪${plan.price.toStringAsFixed(2)}',
-                              textDirection: TextDirection.ltr,
-                            ),
-                            selected: _selectedBandwidth == plan.bandwidth,
-                            onSelected: (selected) {
-                              if (!selected) return;
-                              setState(() => _selectedBandwidth = plan.bandwidth);
-                            },
+                      ...plans.map(
+                            (plan) => RadioListTile<String>(
+                          value: plan.id,
+                          groupValue: _selectedPlanId,
+                          onChanged: (v) => setState(() {
+                            _selectedPlanId = v;
+                          }),
+                          title: Text(plan.title),
+                          subtitle: Text(
+                            '${plan.bandwidthMbps} Mbps • ₪${plan.price.toStringAsFixed(2)}',
+                            textDirection: TextDirection.ltr,
                           ),
-                        )
-                            .toList(),
+                        ),
                       ),
                       const SizedBox(height: 16),
-                      if (selectedPlan != null) ...[
-                        _infoTile(
-                          icon: Icons.price_change_rounded,
-                          title: 'السعر',
-                          subtitle:
-                          '₪${selectedPlan.price.toStringAsFixed(2)} يتم خصمه الآن',
-                        ),
-                        _infoTile(
-                          icon: Icons.access_time_filled,
-                          title: 'المدة',
-                          subtitle: 'يوم كامل بدون حساب الساعات',
-                        ),
-                      ],
+                      Text('طريقة الدفع', style: theme.textTheme.titleSmall),
+                      const SizedBox(height: 8),
+                      _paymentChips(theme),
+                      _proofField(),
                       const SizedBox(height: 16),
                       FilledButton.icon(
-                        onPressed:
-                        (_starting || selectedPlan == null) ? null : () => _startDaily(selectedPlan),
+                        onPressed: _canStart && selectedPlan != null
+                            ? () => _startDaily(selectedPlan)
+                            : null,
                         icon: _starting
                             ? SizedBox(
                           width: 18,
@@ -357,7 +347,8 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
                             valueColor: AlwaysStoppedAnimation(
-                                theme.colorScheme.onPrimary),
+                              theme.colorScheme.onPrimary,
+                            ),
                           ),
                         )
                             : const Icon(Icons.login_rounded),
@@ -365,42 +356,14 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
                       ),
                     ],
                   ]
-
                   // يوجد جلسة مفتوحة
                   else ...[
-                    Card(
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('ملخص الاشتراك المفتوح',
-                                style: theme.textTheme.titleSmall
-                                    ?.copyWith(fontWeight: FontWeight.w700)),
-                            const SizedBox(height: 12),
-                            if (bandwidth != null)
-                              _summaryRow('الباقة', '$bandwidth Mbps'),
-                            _summaryRow('سعر اليوم', _currency(baseValue ?? 0)),
-                            _summaryRow('المشروبات/الخدمات',
-                                _currency(openSession.drinksTotal)),
-                            _summaryRow('الخصم المطبق',
-                                '- ${_currency(openSession.discount)}'),
-                            const Divider(),
-                            _summaryRow(
-                              'الإجمالي الحالي',
-                              _currency((computedGrand ?? 0) < 0 ? 0 : (computedGrand ?? 0)),
-                              isStrong: true,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+                    _openSessionCard(_openDailySession!, theme),
                     const SizedBox(height: 16),
                     FilledButton.icon(
-                      onPressed: _finishing ? null : () => _finishDaily(openSession),
+                      onPressed: _finishing
+                          ? null
+                          : () => _finishDaily(_openDailySession!),
                       icon: _finishing
                           ? SizedBox(
                         width: 18,
@@ -408,7 +371,8 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
                           valueColor: AlwaysStoppedAnimation(
-                              theme.colorScheme.onPrimary),
+                            theme.colorScheme.onPrimary,
+                          ),
                         ),
                       )
                           : const Icon(Icons.logout_rounded),
@@ -432,8 +396,10 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
           Expanded(child: Text(label)),
           Text(
             value,
-            style: isStrong ? const TextStyle(fontWeight: FontWeight.w800) : null,
             textDirection: TextDirection.ltr,
+            style: isStrong
+                ? const TextStyle(fontWeight: FontWeight.w800)
+                : null,
           ),
         ],
       ),
@@ -443,13 +409,7 @@ class _DailyOnlySheetState extends State<DailyOnlySheet> {
   String _currency(num value) => '₪${value.toStringAsFixed(2)}';
 }
 
-class _DailyPlanOption {
-  final int bandwidth;
-  final num price;
-  const _DailyPlanOption({required this.bandwidth, required this.price});
-}
-
-extension IterableFirstWhereOrNullExtension<T> on Iterable<T> {
+extension _FirstWhereOrNull<T> on Iterable<T> {
   T? firstWhereOrNull(bool Function(T element) test) {
     for (final element in this) {
       if (test(element)) return element;
